@@ -24,6 +24,15 @@ differ.
 
 ## Decisions since PROPOSAL.md
 
+0. **LOCKED (10:52, Mac): the hybrid layout.** See `design/mockups/hybrid.html`. It puts the
+   lanes canvas (item 1) inside the three-pane frame: the script pane on the left, the detail
+   drawer on the right, then the replay bar, Graph/strace toggle, Lineage/Blast radius toggle,
+   context boundary toggle and efficiency footer. The structure and flow are locked: it shows
+   the Code Mode script's run step by step.
+   - **The look is NOT locked.** That mockup is hypothetical. The user called it cluttered and
+     messy, "the opposite of easy to use". Don't copy its visuals. Build the same structure, but
+     strip it down: show less at once, add clear hierarchy, and reveal detail on demand.
+     Items 1–2 below still describe the canvas and the drawer.
 1. **The layout is swimlanes, not the three-pane graph.** See `design/mockups/lanes.html` and
    `lanes-*.png`.
    - Rows: YOU, MODEL, SCRIPT, then one row per MCP server. Top to bottom is cause, left to
