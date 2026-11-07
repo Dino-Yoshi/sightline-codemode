@@ -855,7 +855,7 @@ export function App() {
       {/* Top Header */}
       <header>
         <div className="brand">
-          <span className="brand-icon">◈</span> MCP<span>Vision</span>
+          <span className="brand-icon">◈</span> Sight<span>Line</span>
           <small>/ STRACE FOR CODE MODE</small>
         </div>
         {/* G6: Run Picker with Honest Labels */}
@@ -1582,7 +1582,7 @@ export function App() {
           SANDBOX ONLY <b>{fmt(graph.summary?.sandbox_tokens ?? 0)} tokens</b>
         </span>
         <span className="footer-end">
-          MCPVision · Value lineage for Code Mode · Click node to trace · ← → to step
+          SightLine · Value lineage for Code Mode · Click node to trace · ← → to step
         </span>
       </footer>
     </div>

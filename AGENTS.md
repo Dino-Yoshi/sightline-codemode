@@ -6,7 +6,7 @@ The repo is public: never commit `.env` or `predocs/`.
 
 ### Issue tracker
 
-Issues and specs live in GitHub Issues for Dino-Yoshi/ZeroToHero27 (public), managed through the `gh` CLI. See `docs/agents/issue-tracker.md`.
+Issues and specs live in GitHub Issues for Dino-Yoshi/sightline-codemode (public), managed through the `gh` CLI. See `docs/agents/issue-tracker.md`.
 
 ### Triage labels
 

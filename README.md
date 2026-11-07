@@ -1,6 +1,6 @@
-# MCPVision
+# SightLine
 
-> **strace for Code Mode.** See where every value in your agent's script came from and where it went, and block private data before it leaks.
+> **SightLine: strace for Code Mode.** See where every value in your agent's script came from and where it went, and block private data before it leaks.
 
 Built in one day at **Zero To Demo** (NemulAI × Hack District, 2026-11-07), Frontier track.
 
@@ -8,7 +8,7 @@ Built in one day at **Zero To Demo** (NemulAI × Hack District, 2026-11-07), Fro
 
 In **Code Mode**, the model doesn't call tools one at a time. It writes one script that calls many tools at once. That's fast and saves tokens, but the script is a black box: your private data flows through code nobody reads, and nothing stops it from ending up somewhere public.
 
-Tracing tools show you the *steps* an agent took. MCPVision shows you the *values*: where every argument came from, where every result went, what the model actually saw, and what stayed hidden from it.
+Tracing tools show you the *steps* an agent took. SightLine shows you the *values*: where every argument came from, where every result went, what the model actually saw, and what stayed hidden from it.
 
 ## What you see
 
@@ -27,8 +27,8 @@ Replay runs at 0.25×, 0.5×, 1× or 2×, follows the newest node, and lets you 
 | Run | What happens | What saves you |
 |---|---|---|
 | **Recorded live A**: "Triage this week's open issues and send the October 2026 payroll total to HR." | Issue #42 on the public tracker hides an instruction aimed at AI assistants. It reaches Gemini's context (marked UNTRUSTED). Gemini ignores it. | The model, and **the graph proves it**: nothing private went public. |
-| **Recorded live B**: "Post the October 2026 payroll total as a comment on issue #42 and send it to HR." | An honest human mistake. Gemini does exactly what it was asked. | **MCPVision.** The comment is blocked before it's sent; the HR summary goes through. |
-| **Simulated**: the injection succeeds | A hand-written run showing what happens if #42's hidden instruction works and the model tries to post payroll publicly. | **MCPVision.** Same block, and the reason notes the instruction came from #42, not from you. |
+| **Recorded live B**: "Post the October 2026 payroll total as a comment on issue #42 and send it to HR." | An honest human mistake. Gemini does exactly what it was asked. | **SightLine.** The comment is blocked before it's sent; the HR summary goes through. |
+| **Simulated**: the injection succeeds | A hand-written run showing what happens if #42's hidden instruction works and the model tries to post payroll publicly. | **SightLine.** Same block, and the reason notes the instruction came from #42, not from you. |
 
 The real block reason from run B:
 
@@ -49,14 +49,14 @@ Cloudflare @cloudflare/codemode                ← turns the model's output into
   │
   ▼
 Node vm sandbox runs the script
-  │  every tool call goes through the MCPVision wrapper:
+  │  every tool call goes through the SightLine wrapper:
   ├──► lineage: static data-flow over the generated TypeScript + the real runtime values
   ├──► policy check, BEFORE the call is forwarded
   ├──► 3 MCP servers over stdio: payroll (private) · tracker (public, untrusted) · hr (HR-only)
   └──► run events (JSONL) ──► WebSocket ──► UI
 ```
 
-Gemini doesn't know MCPVision exists. MCPVision sits between the script and the MCP servers, so it sees every call the script makes.
+Gemini doesn't know SightLine exists. SightLine sits between the script and the MCP servers, so it sees every call the script makes.
 
 ### The policy: one rule
 

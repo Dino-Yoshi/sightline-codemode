@@ -442,7 +442,7 @@ export async function runTask(taskKey: 'A' | 'B' | string, options: Partial<RunO
   return events;
 }
 
-/** WebSocket server to broadcast real-time events to MCPVision UI */
+/** WebSocket server to broadcast real-time events to SightLine UI */
 export function startWebSocketServer(port = 8765): WebSocketServer {
   const wss = new WebSocketServer({ port });
   wss.on('connection', (ws) => {

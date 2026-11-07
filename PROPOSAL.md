@@ -1,4 +1,4 @@
-# MCPVision: strace for Code Mode
+# SightLine: strace for Code Mode
 
 The single source of truth for what we're building. If something isn't here, it's out of scope.
 Zero To Demo, 2026-11-07. Track: **Frontier**. Solo builder plus agents. **Submit by 3:30 PM**
@@ -9,12 +9,12 @@ Zero To Demo, 2026-11-07. Track: **Frontier**. Solo builder plus agents. **Submi
 **Code Mode:** instead of calling tools one turn at a time, the model writes one script that calls
 many MCP tools. It's fast, but you can't see what happened inside the script.
 
-**MCPVision** is a Code Mode gateway that shows **how the data moved**: where every argument
+**SightLine** is a Code Mode gateway that shows **how the data moved**: where every argument
 came from, where every result went, what the model saw, and what stayed hidden from it. Langfuse
 and similar tools graph *steps*. We graph *values*. Never say "first". Say "we couldn't find a
 tool that does this". Credit CaMeL for the value-tracking idea.
 
-| The developer asks | MCPVision answers with |
+| The developer asks | SightLine answers with |
 |---|---|
 | What did my agent's script actually do? | A lane graph that builds live, step by step |
 | Where did this value come from, and where did it go? | Click it: the path lights up, and the edges show the real values |
@@ -60,7 +60,7 @@ The structure comes from `design/mockups/hybrid.html`. **Don't copy its look.** 
 ## 3. How it works
 
 **DECIDED (11:40): we use the REAL Code Mode, Cloudflare's `codemode` (TypeScript), driven by
-Gemini.** We don't run our own interpreter. MCPVision *watches* real Code Mode from outside.
+Gemini.** We don't run our own interpreter. SightLine *watches* real Code Mode from outside.
 
 ```
 task ─► Gemini (Vertex, via AI SDK) ─► real Cloudflare Code Mode writes TS ─► sandbox runs it
