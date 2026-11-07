@@ -9,6 +9,7 @@
   but its look is not.
 - The build issues are on GitHub, labelled `ready-for-agent`.
 - `runs/fake-run.jsonl` is the canonical example run. The UI is built against it.
+- **Code Mode runtime decision (11:50)**: Cloudflare's `@cloudflare/codemode` `DynamicWorkerExecutor` requires Cloudflare Workers dynamic dispatch (`WorkerLoader` binding) and `cloudflare:workers` runtime primitives not present in local Node. Per `PROPOSAL.md` §3 and GitHub issue #2 fallback, we took the **Node `vm` runtime path**: real Code Mode prompt and TypeScript/JavaScript code generation driven by Gemini (`gemini-3.7-flash` via Vertex AI), with execution of the generated code inside a Node `vm` sandbox via the tool wrapper.
 
 ## Schedule (solo with agents; submit at 3:30, hard close 5:30)
 
