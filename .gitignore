@@ -1,0 +1,14 @@
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+.venv/
+
+# OS
+.DS_Store
+
+# Private research and personal inventory: never publish
+predocs/
