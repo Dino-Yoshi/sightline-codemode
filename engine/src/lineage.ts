@@ -79,6 +79,12 @@ export function analyze(code: string): Analysis {
     return unique(out);
   }
   function walk(n: ts.Node): void {
+    if (ts.isArrowFunction(n) || ts.isFunctionExpression(n)) {
+      if (ts.isBlock(n.body)) {
+        ts.forEachChild(n.body, walk);
+        return;
+      }
+    }
     if (ts.isVariableDeclaration(n)) {
       if (!ts.isIdentifier(n.name)) { error(n, 'Destructuring lineage is unknown'); if (n.initializer) refs(n.initializer); return; }
       result.deps[n.name.text] = n.initializer ? refs(n.initializer) : ['unknown'];
@@ -97,6 +103,22 @@ export function analyze(code: string): Analysis {
     }
     if (ts.isExpressionStatement(n)) {
       const expr = n.expression;
+      if (ts.isArrowFunction(expr) || ts.isFunctionExpression(expr)) {
+        if (ts.isBlock(expr.body)) {
+          ts.forEachChild(expr.body, walk);
+          return;
+        }
+      }
+      if (ts.isCallExpression(expr)) {
+        let fn: ts.Expression = expr.expression;
+        if (ts.isParenthesizedExpression(fn)) fn = fn.expression;
+        if (ts.isArrowFunction(fn) || ts.isFunctionExpression(fn)) {
+          if (ts.isBlock(fn.body)) {
+            ts.forEachChild(fn.body, walk);
+            return;
+          }
+        }
+      }
       if (ts.isBinaryExpression(expr) && expr.operatorToken.kind >= ts.SyntaxKind.FirstAssignment && expr.operatorToken.kind <= ts.SyntaxKind.LastAssignment) {
         const dependencies = refs(expr.right);
         if (ts.isIdentifier(expr.left)) {

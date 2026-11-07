@@ -48,12 +48,13 @@ describe('createFixtureObserver & Policy', () => {
       await hr.post_summary({ text: \`October payroll: \${total}\` });
     `;
     const tools = await createFixtureObserver(code, emit);
-    const pay = await tools.payroll.get_salaries({ month: '2026-10' }) as Array<{ gross: number }>;
+    const payRes = await tools.payroll.get_salaries({ month: '2026-10' }) as { content: { type: string; text: string }[] };
+    const pay = JSON.parse(payRes.content[0].text) as Array<{ gross: number }>;
     expect(pay.length).toBe(214);
     const total = pay.reduce((s, r) => s + r.gross, 0);
-    expect(total).toBe(1284600);
+    expect(total).toBe(1699983);
     const hrResult = await tools.hr.post_summary({ text: `October payroll: ${total}` });
-    expect(hrResult).toEqual({ ok: true, posted: 'October payroll: 1284600' });
+    expect(hrResult).toEqual({ content: [{ type: 'text', text: 'stored (1)' }] });
 
     const callEvents = events.filter(e => e.type === 'call');
     expect(callEvents.length).toBe(2);
@@ -78,8 +79,8 @@ describe('createFixtureObserver & Policy', () => {
     expect(blockedEvents.length).toBe(1);
     expect(blockedEvents[0].server).toBe('tracker');
     expect(blockedEvents[0].tool).toBe('post_comment');
-    expect(blockedEvents[0].rule).toBe('private→public');
-    expect(blockedEvents[0].reason).toContain('payroll.get_salaries (private)');
+    expect(blockedEvents[0].rule).toBe('private-to-public');
+    expect(blockedEvents[0].reason).toContain('Private lineage');
   });
 });
 

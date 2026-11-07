@@ -4,27 +4,96 @@ import runText from '../../runs/fake-run.jsonl?raw';
 import { inspect, parseRun, view, type Node, type Mode, type Edge, type RunEvent } from './view';
 import './style.css';
 
-const runEvents: RunEvent[] = parseRun(runText);
-const graph = view(runEvents);
-const maxStep = graph.steps.at(-1) ?? 1;
-
+const defaultRunEvents: RunEvent[] = parseRun(runText);
 const fmt = (n: number) => n.toLocaleString();
 
 export function App() {
+  const [source, setSource] = useState<'recorded' | 'live'>('recorded');
+  const [liveTask, setLiveTask] = useState<'A' | 'B'>('A');
+  const [liveEvents, setLiveEvents] = useState<RunEvent[]>([]);
+  const [isStreaming, setIsStreaming] = useState<boolean>(false);
+  const [wsStatus, setWsStatus] = useState<'idle' | 'connecting' | 'connected' | 'error'>('idle');
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+
+  const runEvents = useMemo(() => {
+    return source === 'live' && liveEvents.length > 0 ? liveEvents : defaultRunEvents;
+  }, [source, liveEvents]);
+
+  const graph = useMemo(() => {
+    return view(runEvents);
+  }, [runEvents]);
+
+  const maxStep = graph.steps.at(-1) ?? 1;
+
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [mode, setMode] = useState<Mode>('lineage');
   const [step, setStep] = useState<number>(maxStep);
   const [display, setDisplay] = useState<'graph' | 'strace'>('graph');
   const [playing, setPlaying] = useState<boolean>(false);
 
+  // Sync step with maxStep when runEvents change (e.g. streaming or switching source)
+  useEffect(() => {
+    if (source === 'recorded') {
+      setStep(graph.steps.at(-1) ?? 1);
+    }
+  }, [source, graph.steps]);
+
+  const startLiveRun = useCallback((taskKey: 'A' | 'B') => {
+    setSource('live');
+    setLiveTask(taskKey);
+    setLiveEvents([]);
+    setSelectedId(null);
+    setErrorMessage(null);
+    setIsStreaming(true);
+    setWsStatus('connecting');
+
+    try {
+      const ws = new WebSocket('ws://localhost:8765');
+      ws.onopen = () => {
+        setWsStatus('connected');
+        ws.send(JSON.stringify({ action: 'run', task: taskKey }));
+      };
+      ws.onmessage = (msg) => {
+        try {
+          const event = JSON.parse(msg.data) as RunEvent;
+          setLiveEvents((prev) => {
+            const next = [...prev, event];
+            return next;
+          });
+          if (typeof event.step === 'number') {
+            setStep(event.step);
+          }
+          if (event.type === 'summary') {
+            setIsStreaming(false);
+          }
+        } catch (err) {
+          console.error('Error parsing live event', err);
+        }
+      };
+      ws.onerror = (err) => {
+        console.error('WebSocket error', err);
+        setWsStatus('error');
+        setErrorMessage('Cannot connect to ws://localhost:8765. Make sure the engine server is running.');
+        setIsStreaming(false);
+      };
+      ws.onclose = () => {
+        setIsStreaming(false);
+      };
+    } catch (err) {
+      setWsStatus('error');
+      setErrorMessage(err instanceof Error ? err.message : String(err));
+      setIsStreaming(false);
+    }
+  }, []);
+
   const detail = useMemo(() => {
     if (!selectedId) return null;
     return inspect(graph, selectedId, mode, step);
-  }, [selectedId, mode, step]);
+  }, [graph, selectedId, mode, step]);
 
   const visibleNodes = useMemo(() => {
     return graph.nodes.filter((n) => n.step <= step);
-  }, [step]);
+  }, [graph.nodes, step]);
 
   const visibleNodeIds = useMemo(() => {
     return new Set(visibleNodes.map((n) => n.id));
@@ -47,7 +116,7 @@ export function App() {
       };
     }
     return pos;
-  }, []);
+  }, [graph.nodes, graph.lanes]);
 
   // Replay timer
   useEffect(() => {
@@ -100,7 +169,7 @@ export function App() {
     (line: number) => {
       return graph.nodes.find((n) => n.kind === 'script' && n.line === line);
     },
-    [],
+    [graph.nodes],
   );
 
   const promptEvent = runEvents.find((e) => e.type === 'prompt');
@@ -117,15 +186,42 @@ export function App() {
           <span className="task-label">YOUR TASK</span>
           <strong>{promptEvent?.text ?? "Triage issues and send payroll total to HR"}</strong>
         </div>
+        <div className="seg">
+          <button
+            className={source === 'recorded' ? 'active' : ''}
+            onClick={() => {
+              setSource('recorded');
+              setSelectedId(null);
+            }}
+          >
+            Recorded
+          </button>
+          <button
+            className={source === 'live' && liveTask === 'A' ? 'active' : ''}
+            onClick={() => startLiveRun('A')}
+          >
+            Live Run A
+          </button>
+          <button
+            className={source === 'live' && liveTask === 'B' ? 'active' : ''}
+            onClick={() => startLiveRun('B')}
+          >
+            Live Run B
+          </button>
+        </div>
         <button
           className="run-btn"
           onClick={() => {
-            setSelectedId(null);
-            setStep(1);
-            setPlaying(true);
+            if (source === 'live') {
+              startLiveRun(liveTask);
+            } else {
+              setSelectedId(null);
+              setStep(1);
+              setPlaying(true);
+            }
           }}
         >
-          ▶ <span>Run replay</span>
+          ▶ <span>{source === 'live' ? (isStreaming ? 'Streaming...' : `Run live ${liveTask}`) : 'Run replay'}</span>
         </button>
         <div className="seg">
           <button
@@ -146,9 +242,11 @@ export function App() {
       {/* Toolbar */}
       <div className="toolbar">
         <div className="status">
-          <i /> <b>Recorded run</b>
-          <span>·</span> {graph.summary?.rounds ?? 2} rounds <span>·</span>{' '}
+          <i style={{ background: source === 'live' ? (isStreaming ? '#5bd38a' : '#6ca8ff') : undefined }} />
+          <b>{source === 'live' ? (isStreaming ? `Live streaming (${liveTask})` : `Live run (${liveTask})`) : 'Recorded run'}</b>
+          <span>·</span> {graph.summary?.rounds ?? (runEvents.filter((e) => e.type === 'model_turn').length || 1)} rounds <span>·</span>{' '}
           {fmt(runEvents.at(-1)?.t ?? 0)} ms
+          {errorMessage && <span style={{ color: '#ff5c5c', marginLeft: 8 }}>· {errorMessage}</span>}
         </div>
         <div className="toolbar-right">
           <span className="control-label">TRACE</span>
@@ -562,6 +660,8 @@ export function App() {
           <Drawer
             node={detail.node}
             args={detail.arguments}
+            graph={graph}
+            runEvents={runEvents}
             onPick={selectNode}
             onClose={() => setSelectedId(null)}
           />
@@ -590,11 +690,15 @@ export function App() {
 function Drawer({
   node,
   args,
+  graph,
+  runEvents,
   onPick,
   onClose,
 }: {
   node: Node;
   args: Array<{ name: string; preview: string; sources: Node[] }>;
+  graph: ReturnType<typeof view>;
+  runEvents: RunEvent[];
   onPick: (id: string) => void;
   onClose: () => void;
 }) {

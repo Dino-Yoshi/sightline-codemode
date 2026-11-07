@@ -87,10 +87,12 @@ export function wrapTools(
   servers: Record<string, ServerPolicy>,
   analysis: Analysis,
   emit: (e: RunEvent) => void,
+  options?: { step?: number; start?: number; modelTurnId?: string },
 ): CodeModeTools {
   const sitesFor = (server: string, tool: string): CallSite[] =>
     analysis.sites.filter((s) => s.server === server && s.tool === tool);
   const used: Record<string, number> = {};
+  const siteToValueId: Record<string, string> = {};
 
   /**
    * Resolve the sensitivity of a set of variable/site references by walking the
@@ -117,8 +119,36 @@ export function wrapTools(
     return parts.includes('private') ? 'private' : 'public';
   };
 
-  let step = 0;
-  const start = Date.now();
+  const resolveFromIds = (refs: string[]): string[] => {
+    const ids = new Set<string>();
+    const seen = new Set<string>();
+    const visit = (ref: string) => {
+      if (seen.has(ref)) return;
+      seen.add(ref);
+      if (siteToValueId[ref]) {
+        ids.add(siteToValueId[ref]);
+        return;
+      }
+      const site = analysis.sites.find((s) => s.id === ref);
+      if (site) {
+        if (siteToValueId[site.id]) ids.add(siteToValueId[site.id]);
+        return;
+      }
+      const deps = analysis.deps[ref];
+      if (deps && deps.length > 0) {
+        for (const d of deps) visit(d);
+      }
+    };
+    for (const r of refs) visit(r);
+    const result = Array.from(ids);
+    if (result.length === 0 && options?.modelTurnId) {
+      return [options.modelTurnId];
+    }
+    return result;
+  };
+
+  let step = options?.step ?? 0;
+  const start = options?.start ?? Date.now();
 
   const makeTool =
     (server: string, policy: ServerPolicy, client: McpToolClient, tool: string) =>
@@ -131,13 +161,14 @@ export function wrapTools(
 
       // Build per-argument lineage previews and compute the worst sensitivity.
       const argEvents: Record<string, { preview: string; from: string[] }> = {};
-      let worst: Lineage['sensitivity'] = 'public';
+      let worst: Lineage['sensitivity'] = site ? 'public' : 'unknown';
       const allFrom: string[] = [];
       for (const [name, value] of Object.entries(args)) {
-        const from = site?.args[name] ?? [];
+        const rawFrom = site?.args[name] ?? [];
+        const from = resolveFromIds(rawFrom);
         argEvents[name] = { preview: preview(value), from };
-        allFrom.push(...from);
-        const s = resolveSensitivity(from);
+        allFrom.push(...rawFrom);
+        const s = resolveSensitivity(rawFrom);
         if (s === 'unknown') worst = 'unknown';
         else if (s === 'private' && worst !== 'unknown') worst = 'private';
       }
@@ -153,6 +184,10 @@ export function wrapTools(
 
       step += 1;
       const callId = `c${step}`;
+      const valId = `v${step}`;
+      if (site) {
+        siteToValueId[site.id] = valId;
+      }
 
       if (!decision.allow) {
         // Blocked: emit and return WITHOUT forwarding to the server.
@@ -173,26 +208,27 @@ export function wrapTools(
         return { blocked: true, rule: decision.rule, reason: decision.reason };
       }
 
-      emit({
-        type: 'call',
-        id: callId,
-        server,
-        tool,
-        line,
-        transport: 'stdio',
-        args: argEvents,
-        rpc,
-        ms: 0,
-        t: Date.now() - start,
-        step,
-      });
-
+      const t0 = Date.now();
       try {
         const res = await client.callTool({ name: tool, arguments: args });
+        const ms = Math.max(1, Date.now() - t0);
+        emit({
+          type: 'call',
+          id: callId,
+          server,
+          tool,
+          line,
+          transport: 'stdio',
+          args: argEvents,
+          rpc,
+          ms,
+          t: Date.now() - start,
+          step,
+        });
         const text = extractText(res);
         emit({
           type: 'value',
-          id: `v${step}`,
+          id: valId,
           from: [callId],
           op: 'result',
           line,

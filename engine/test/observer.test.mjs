@@ -33,7 +33,7 @@ async function connect(name) {
   const client = new Client({ name: `test-${name}`, version: '1.0.0' });
   const transport = new StdioClientTransport({
     command: process.execPath,
-    args: [resolve(here, '../node_modules/tsx/dist/cli.mjs'), resolve(fixtures, `${name}.ts`)],
+    args: ['--import', 'tsx', resolve(fixtures, `${name}.ts`)],
     cwd: fixtures,
   });
   await client.connect(transport);
