@@ -171,4 +171,25 @@ describe('Seam B: collapsing intermediate values and deduping repeats', () => {
     const trackerCalls = fullRunA.nodes.filter((n) => n.event.server === 'tracker' && n.event.tool === 'list_issues');
     expect(trackerCalls.length).toBe(4);
   });
+
+  it('assigns deterministic layered columns such that every edge goes strictly left-to-right', () => {
+    for (const [name, v] of [['fake', vFake], ['runA', vRunA], ['runB', vRunB]] as const) {
+      const colMap = new Map(v.nodes.map((n) => [n.id, n.column ?? 1]));
+      for (const e of v.edges) {
+        const fromCol = colMap.get(e.from) ?? 1;
+        const toCol = colMap.get(e.to) ?? 1;
+        expect(toCol, `Edge ${e.from} -> ${e.to} in ${name} must go left-to-right (${fromCol} < ${toCol})`).toBeGreaterThan(fromCol);
+      }
+    }
+  });
+
+  it('shows actual request text for prompt node and in story sentence', () => {
+    const promptNode = vFake.nodes.find((n) => n.kind === 'prompt');
+    expect(promptNode?.title).toBe('You asked');
+    expect(promptNode?.subtitle).toContain("Triage this week's open issues");
+
+    const promptNodeB = vRunB.nodes.find((n) => n.kind === 'prompt');
+    expect(promptNodeB?.title).toBe('You asked');
+    expect(promptNodeB?.subtitle).toContain('Post the October 2026');
+  });
 });

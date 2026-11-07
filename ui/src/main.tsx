@@ -24,7 +24,6 @@ const presetRuns: Record<string, { label: string; text: string }> = {
 const fmt = (n: number) => n.toLocaleString();
 
 const LANE_SUBTITLES: Record<string, string> = {
-  YOU: 'your request',
   MODEL: 'Gemini: writes code, never calls tools',
   SCRIPT: 'the code it wrote, running in a sandbox',
   payroll: 'private data',
@@ -35,6 +34,9 @@ const LANE_SUBTITLES: Record<string, string> = {
 const NODE_WIDTH = 200;
 const NODE_HEIGHT = 72;
 const CARD_GAP_Y = 12;
+const COLUMN_WIDTH = 270;
+const GUTTER_WIDTH = 70;
+const LEFT_OFFSET = 170;
 
 export function App() {
   const [source, setSource] = useState<'recorded' | 'live'>('recorded');
@@ -45,26 +47,41 @@ export function App() {
   const [wsStatus, setWsStatus] = useState<'idle' | 'connecting' | 'connected' | 'error'>('idle');
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
-  // Feature Toggles (Spec 4a, 6, 8)
-  const [showEveryStep, setShowEveryStep] = useState<boolean>(false);
+  // Feature Toggles (Spec 4a, 6, 8, Polish F3, F4)
+  const [userShowEveryStep, setUserShowEveryStep] = useState<boolean>(false);
   const [replaySpeed, setReplaySpeed] = useState<1 | 2>(1);
   const [isFit, setIsFit] = useState<boolean>(false);
   const [autoFollow, setAutoFollow] = useState<boolean>(true);
   const [showLegend, setShowLegend] = useState<boolean>(false);
 
+  // Side Panes and Focus Mode (Polish F4)
+  const [leftCollapsed, setLeftCollapsed] = useState<boolean>(false);
+  const [rightCollapsed, setRightCollapsed] = useState<boolean>(false);
+  const [focusMode, setFocusMode] = useState<boolean>(true);
+
+  // Playback & Animation (Polish F1)
+  const [playing, setPlaying] = useState<boolean>(false);
+  const [justRevealedId, setJustRevealedId] = useState<string | null>(null);
+
+  // Live queue ref (Polish F2)
+  const liveQueueRef = useRef<RunEvent[]>([]);
+
   const canvasScrollRef = useRef<HTMLDivElement>(null);
   const isAutoScrollingRef = useRef<boolean>(false);
   const scriptContainerRef = useRef<HTMLElement>(null);
 
+  // Dynamic detail level during playback/streaming (Polish F3)
+  const effectiveShowEveryStep = playing || isStreaming ? true : userShowEveryStep;
+
   const rawEvents = useMemo(() => {
-    if (source === 'live' && liveEvents.length > 0) return liveEvents;
+    if (source === 'live') return liveEvents;
     const txt = presetRuns[recordedKey]?.text ?? fakeRunText;
     return parseRun(txt);
   }, [source, liveEvents, recordedKey]);
 
   const graph = useMemo(() => {
-    return view(rawEvents, { showEveryStep });
-  }, [rawEvents, showEveryStep]);
+    return view(rawEvents, { showEveryStep: effectiveShowEveryStep });
+  }, [rawEvents, effectiveShowEveryStep]);
 
   const runStory = useMemo(() => {
     return story(graph);
@@ -75,17 +92,20 @@ export function App() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [step, setStep] = useState<number>(maxStep);
   const [display, setDisplay] = useState<'graph' | 'strace'>('graph');
-  const [playing, setPlaying] = useState<boolean>(false);
 
-  // Sync step with maxStep when source or recorded preset changes
+  // Sync step with maxStep when source or recorded preset changes (when not replaying/streaming)
   useEffect(() => {
-    setStep(graph.steps.at(-1) ?? 1);
-  }, [recordedKey, source, graph.steps]);
+    if (!playing && !isStreaming) {
+      setStep(graph.steps.at(-1) ?? 1);
+    }
+  }, [recordedKey, source, graph.steps, playing, isStreaming]);
 
+  // Live run WebSocket starter (Polish F2)
   const startLiveRun = useCallback((taskKey: 'A' | 'B') => {
     setSource('live');
     setLiveTask(taskKey);
     setLiveEvents([]);
+    liveQueueRef.current = [];
     setSelectedId(null);
     setErrorMessage(null);
     setIsStreaming(true);
@@ -101,13 +121,7 @@ export function App() {
       ws.onmessage = (msg) => {
         try {
           const event = JSON.parse(msg.data) as RunEvent;
-          setLiveEvents((prev) => [...prev, event]);
-          if (typeof event.step === 'number') {
-            setStep(event.step);
-          }
-          if (event.type === 'summary') {
-            setIsStreaming(false);
-          }
+          liveQueueRef.current.push(event);
         } catch (err) {
           console.error('Error parsing live event', err);
         }
@@ -119,7 +133,7 @@ export function App() {
         setIsStreaming(false);
       };
       ws.onclose = () => {
-        setIsStreaming(false);
+        // Queue drainer will finish streaming once empty
       };
     } catch (err) {
       setWsStatus('error');
@@ -127,6 +141,29 @@ export function App() {
       setIsStreaming(false);
     }
   }, []);
+
+  // Live queue pacing timer (Polish F2: ~450ms at 1x)
+  useEffect(() => {
+    if (!isStreaming && liveQueueRef.current.length === 0) return;
+
+    const interval = replaySpeed === 2 ? 225 : 450;
+    const timer = setInterval(() => {
+      if (liveQueueRef.current.length > 0) {
+        const nextEvent = liveQueueRef.current.shift()!;
+        setLiveEvents((prev) => [...prev, nextEvent]);
+        if (typeof nextEvent.step === 'number') {
+          setStep(nextEvent.step);
+          const nId = nextEvent.id ?? `step-${nextEvent.step}`;
+          setJustRevealedId(nId);
+        }
+        if (nextEvent.type === 'summary') {
+          setIsStreaming(false);
+        }
+      }
+    }, interval);
+
+    return () => clearInterval(timer);
+  }, [isStreaming, replaySpeed]);
 
   const detail = useMemo(() => {
     if (!selectedId) return null;
@@ -141,46 +178,26 @@ export function App() {
     return new Set(visibleNodes.map((n) => n.id));
   }, [visibleNodes]);
 
-  // Compute rounds and round boundaries (Spec 4c)
-  const roundInfo = useMemo(() => {
-    const models = rawEvents.filter((e) => e.type === 'model_turn');
-    const rounds: Array<{ round: number; startStep: number; endStep: number; startX: number }> = [];
-
-    for (let r = 1; r <= (models.length || 1); r++) {
-      const model = models.find((m) => m.round === r) ?? models[r - 1];
-      const startStep = model ? model.step : (r === 1 ? 1 : 2);
-      const nextModel = models.find((m) => m.round === r + 1) ?? models[r];
-      const endStep = nextModel && nextModel !== model ? nextModel.step - 1 : maxStep;
-      const startX = 170 + Math.max(0, startStep - 1) * 210 - 20;
-
-      rounds.push({
-        round: r,
-        startStep,
-        endStep,
-        startX,
-      });
-    }
-    return rounds;
-  }, [rawEvents, maxStep]);
-
-  // 1. ROW OVERFLOW FIX: Compute dynamic lane heights and positions (Spec 1)
+  // Layered Layout computation & Orthogonal routing (Polish L1, L2, L3)
   const layout = useMemo(() => {
     const laneHeightMap: Record<string, number> = {};
     const laneTopMap: Record<string, number> = {};
-    const pos: Record<string, { x: number; y: number }> = {};
+    const pos: Record<string, { x: number; y: number; col: number }> = {};
+
+    const maxCol = Math.max(1, ...graph.nodes.map((n) => n.column ?? 1));
 
     // Calculate max stacked items in any column for each lane
     for (const lane of graph.lanes) {
       const laneNodes = graph.nodes.filter((n) => n.lane === lane);
-      const stepCounts: Record<number, number> = {};
+      const colCounts: Record<number, number> = {};
 
       for (const node of laneNodes) {
-        stepCounts[node.step] = (stepCounts[node.step] ?? 0) + 1;
+        const c = node.column ?? 1;
+        colCounts[c] = (colCounts[c] ?? 0) + 1;
       }
 
-      const maxStack = Math.max(1, ...Object.values(stepCounts), 1);
-      // Lane height accommodates header (40px) + all stacked cards + gaps + padding (24px)
-      const height = Math.max(140, 44 + maxStack * NODE_HEIGHT + Math.max(0, maxStack - 1) * CARD_GAP_Y + 24);
+      const maxStack = Math.max(1, ...Object.values(colCounts), 1);
+      const height = Math.max(130, 44 + maxStack * NODE_HEIGHT + Math.max(0, maxStack - 1) * CARD_GAP_Y + 24);
       laneHeightMap[lane] = height;
     }
 
@@ -188,26 +205,85 @@ export function App() {
     let currentTop = 20;
     for (const lane of graph.lanes) {
       laneTopMap[lane] = currentTop;
-      currentTop += laneHeightMap[lane] + 16; // 16px gap between lane tracks
+      currentTop += laneHeightMap[lane] + 16;
     }
 
     const totalHeight = currentTop + 40;
 
-    // Position each node
-    const laneStepCounts: Record<string, number> = {};
-    for (const node of graph.nodes) {
-      const key = `${node.lane}-${node.step}`;
-      const count = laneStepCounts[key] ?? 0;
-      laneStepCounts[key] = count + 1;
+    // Position each node: within lane and column, ordered by first-seen order
+    for (const lane of graph.lanes) {
+      const laneNodes = graph.nodes.filter((n) => n.lane === lane);
+      const byCol = new Map<number, Node[]>();
+      for (const node of laneNodes) {
+        const c = node.column ?? 1;
+        if (!byCol.has(c)) byCol.set(c, []);
+        byCol.get(c)!.push(node);
+      }
 
-      const laneTop = laneTopMap[node.lane] ?? 20;
-      const x = 170 + (node.step - 1) * 210;
-      const y = laneTop + 44 + count * (NODE_HEIGHT + CARD_GAP_Y);
-
-      pos[node.id] = { x, y };
+      for (const [col, colNodes] of byCol.entries()) {
+        colNodes.forEach((node, stackIdx) => {
+          const laneTop = laneTopMap[lane] ?? 20;
+          const x = LEFT_OFFSET + (col - 1) * COLUMN_WIDTH;
+          const y = laneTop + 44 + stackIdx * (NODE_HEIGHT + CARD_GAP_Y);
+          pos[node.id] = { x, y, col };
+        });
+      }
     }
 
-    const totalWidth = Math.max(1100, 240 + maxStep * 210);
+    const totalWidth = Math.max(1100, LEFT_OFFSET + maxCol * COLUMN_WIDTH + 100);
+
+    // Compute orthogonal edge routes and 6px vertical tracks per gutter (Polish L2)
+    const gutterEdges = new Map<number, Edge[]>();
+    for (const edge of graph.edges) {
+      const pFrom = pos[edge.from];
+      const pTo = pos[edge.to];
+      if (!pFrom || !pTo) continue;
+      const g = pFrom.col;
+      if (!gutterEdges.has(g)) gutterEdges.set(g, []);
+      gutterEdges.get(g)!.push(edge);
+    }
+
+    const edgePaths: Record<string, string> = {};
+    for (const [g, edges] of gutterEdges.entries()) {
+      const sortedEdges = [...edges].sort((a, b) => {
+        const yAFrom = pos[a.from]?.y ?? 0;
+        const yBFrom = pos[b.from]?.y ?? 0;
+        if (yAFrom !== yBFrom) return yAFrom - yBFrom;
+        const yATo = pos[a.to]?.y ?? 0;
+        const yBTo = pos[b.to]?.y ?? 0;
+        return yATo - yBTo;
+      });
+
+      const count = sortedEdges.length;
+      const xMid = LEFT_OFFSET + (g - 1) * COLUMN_WIDTH + NODE_WIDTH + GUTTER_WIDTH / 2;
+
+      sortedEdges.forEach((e, idx) => {
+        const pFrom = pos[e.from];
+        const pTo = pos[e.to];
+        if (!pFrom || !pTo) return;
+
+        const x1 = pFrom.x + NODE_WIDTH;
+        const y1 = pFrom.y + NODE_HEIGHT / 2;
+        const x2 = pTo.x;
+        const y2 = pTo.y + NODE_HEIGHT / 2;
+
+        const trackOffset = (idx - (count - 1) / 2) * 6;
+        const xTrack = xMid + trackOffset;
+
+        let pathStr = '';
+        if (Math.abs(y1 - y2) < 2 && pTo.col === pFrom.col + 1) {
+          pathStr = `M ${x1} ${y1} L ${x2} ${y2}`;
+        } else {
+          const R = Math.min(8, Math.max(2, Math.abs(xTrack - x1) / 2), Math.max(2, Math.abs(y2 - y1) / 2));
+          if (y2 > y1) {
+            pathStr = `M ${x1} ${y1} L ${xTrack - R} ${y1} Q ${xTrack} ${y1}, ${xTrack} ${y1 + R} L ${xTrack} ${y2 - R} Q ${xTrack} ${y2}, ${xTrack + R} ${y2} L ${x2} ${y2}`;
+          } else {
+            pathStr = `M ${x1} ${y1} L ${xTrack - R} ${y1} Q ${xTrack} ${y1}, ${xTrack} ${y1 - R} L ${xTrack} ${y2 + R} Q ${xTrack} ${y2}, ${xTrack + R} ${y2} L ${x2} ${y2}`;
+          }
+        }
+        edgePaths[`${e.from}-${e.to}-${e.kind}`] = pathStr;
+      });
+    }
 
     return {
       pos,
@@ -215,10 +291,33 @@ export function App() {
       laneTopMap,
       totalHeight,
       totalWidth,
+      edgePaths,
+      maxCol,
     };
-  }, [graph.nodes, graph.lanes, maxStep]);
+  }, [graph.nodes, graph.lanes, graph.edges]);
 
-  // Replay timer (Spec 6)
+  // Round Headers & Vertical Dividers (Polish L1)
+  const roundInfo = useMemo(() => {
+    const models = rawEvents.filter((e) => e.type === 'model_turn');
+    const rounds: Array<{ round: number; startX: number }> = [];
+
+    for (let r = 1; r <= (models.length || 1); r++) {
+      const modelEvent = models.find((m) => m.round === r) ?? models[r - 1];
+      const modelNode = graph.nodes.find(
+        (n) => n.kind === 'model_turn' && (n.round === r || n.id === modelEvent?.id),
+      );
+      const col = modelNode?.column ?? (r === 1 ? 2 : 2 + (r - 1) * 3);
+      const startX = LEFT_OFFSET + (col - 1) * COLUMN_WIDTH - 25;
+
+      rounds.push({
+        round: r,
+        startX,
+      });
+    }
+    return rounds;
+  }, [rawEvents, graph.nodes]);
+
+  // Replay timer (Polish F1)
   useEffect(() => {
     if (!playing) return;
     if (step >= maxStep) {
@@ -227,10 +326,26 @@ export function App() {
     }
     const interval = replaySpeed === 2 ? 350 : 700;
     const timer = setTimeout(() => {
-      setStep((s) => Math.min(maxStep, s + 1));
+      setStep((s) => {
+        const next = Math.min(maxStep, s + 1);
+        const newestNode = graph.nodes.find((n) => n.step === next);
+        if (newestNode) {
+          setJustRevealedId(newestNode.id);
+        }
+        return next;
+      });
     }, interval);
     return () => clearTimeout(timer);
-  }, [playing, step, maxStep, replaySpeed]);
+  }, [playing, step, maxStep, replaySpeed, graph.nodes]);
+
+  // Clear pulse highlight after animation
+  useEffect(() => {
+    if (!justRevealedId) return;
+    const timer = setTimeout(() => {
+      setJustRevealedId(null);
+    }, 600);
+    return () => clearTimeout(timer);
+  }, [justRevealedId]);
 
   // Keyboard navigation
   useEffect(() => {
@@ -263,13 +378,12 @@ export function App() {
     }
   }, [step, selectedId, visibleNodeIds]);
 
-  // Auto-scroll to newest node when replaying or streaming (Spec 6)
+  // Auto-scroll centering newest node when replaying or streaming (Polish F1)
   useEffect(() => {
     if (!autoFollow || isFit) return;
     const scrollContainer = canvasScrollRef.current;
     if (!scrollContainer) return;
 
-    // Find the latest active node
     const activeNodes = visibleNodes.filter((n) => n.step === step);
     const targetNode = activeNodes.at(-1) ?? visibleNodes.at(-1);
     if (!targetNode) return;
@@ -278,8 +392,8 @@ export function App() {
     if (!pos) return;
 
     isAutoScrollingRef.current = true;
-    const targetLeft = Math.max(0, pos.x - scrollContainer.clientWidth / 2 + NODE_WIDTH / 2);
-    const targetTop = Math.max(0, pos.y - scrollContainer.clientHeight / 2 + NODE_HEIGHT / 2);
+    const targetLeft = Math.max(0, pos.x + NODE_WIDTH / 2 - scrollContainer.clientWidth / 2);
+    const targetTop = Math.max(0, pos.y + NODE_HEIGHT / 2 - scrollContainer.clientHeight / 2);
 
     if (typeof scrollContainer.scrollTo === 'function') {
       scrollContainer.scrollTo({
@@ -312,7 +426,7 @@ export function App() {
     }
   }, [graph.nodes, step]);
 
-  // Auto-scroll selected line in script pane (Spec 7)
+  // Auto-scroll selected line in script pane
   useEffect(() => {
     if (!detail?.node?.line) return;
     const container = scriptContainerRef.current;
@@ -324,15 +438,26 @@ export function App() {
   }, [detail?.node?.line]);
 
   const promptEvent = rawEvents.find((e) => e.type === 'prompt');
+  const promptText = promptEvent?.text ?? "Triage issues and send payroll total to HR";
 
-  // Compute Fit scale (Spec 6)
+  // Fit Scale (Polish L4: never scale below 0.75; fit height and scroll horizontally if still too big)
   const fitScale = useMemo(() => {
     if (!isFit || !canvasScrollRef.current) return 1;
     const container = canvasScrollRef.current;
     const scaleX = (container.clientWidth - 40) / layout.totalWidth;
     const scaleY = (container.clientHeight - 40) / layout.totalHeight;
-    return Math.min(scaleX, scaleY, 1);
+    const ideal = Math.min(1, scaleX, scaleY);
+    return ideal >= 0.75 ? ideal : Math.max(0.75, Math.min(1, scaleY));
   }, [isFit, layout.totalWidth, layout.totalHeight]);
+
+  // Focus Mode & Collapsed Side Panes (Polish F4)
+  const isFocusActive = focusMode && (playing || isStreaming);
+  const isLeftCollapsed = isFocusActive || leftCollapsed;
+  const isRightCollapsed = isFocusActive || rightCollapsed;
+
+  // Placeholder for waiting on Gemini (Polish F2)
+  const waitingRound = (rawEvents.filter((e) => e.type === 'model_turn').length || 0) + 1;
+  const isWaitingForGemini = isStreaming && liveQueueRef.current.length === 0;
 
   return (
     <div className="app">
@@ -344,7 +469,7 @@ export function App() {
         </div>
         <div className="task">
           <span className="task-label">YOUR TASK</span>
-          <strong>{promptEvent?.text ?? 'Triage issues and send payroll total to HR'}</strong>
+          <strong title={promptText}>{promptText}</strong>
         </div>
 
         <div className="seg">
@@ -444,16 +569,25 @@ export function App() {
         </div>
 
         <div className="toolbar-right">
-          {/* Show every step toggle (Spec 4a) */}
+          {/* Focus Toggle (Polish F4) */}
           <button
-            className={`tool-toggle ${showEveryStep ? 'active' : ''}`}
-            onClick={() => setShowEveryStep((s) => !s)}
-            title="Toggle showing intermediate steps and uncollapsed lines"
+            className={`tool-toggle ${focusMode ? 'active' : ''}`}
+            onClick={() => setFocusMode((f) => !f)}
+            title="Auto-collapse side panes during playback"
           >
-            {showEveryStep ? '✓ Showing every step' : 'Show every step'}
+            {focusMode ? '✓ Focus on' : 'Focus'}
           </button>
 
-          {/* Fit button (Spec 6) */}
+          {/* Show every step toggle (Spec 4a) */}
+          <button
+            className={`tool-toggle ${userShowEveryStep ? 'active' : ''}`}
+            onClick={() => setUserShowEveryStep((s) => !s)}
+            title="Toggle showing intermediate steps and uncollapsed lines"
+          >
+            {userShowEveryStep ? '✓ Showing every step' : 'Show every step'}
+          </button>
+
+          {/* Fit button (Polish L4) */}
           <button
             className={`tool-toggle ${isFit ? 'active' : ''}`}
             onClick={() => setIsFit((f) => !f)}
@@ -462,7 +596,7 @@ export function App() {
             {isFit ? '100%' : 'Fit'}
           </button>
 
-          {/* Follow button (Spec 6) */}
+          {/* Follow button (Polish F1) */}
           {!autoFollow && (
             <button
               className="tool-toggle pulse"
@@ -511,49 +645,77 @@ export function App() {
       </div>
 
       {/* Main Body */}
-      <main className="with-drawer">
-        {/* Left Script Pane (Spec 7) */}
-        <aside className="script-pane" ref={scriptContainerRef as any}>
-          <div className="pane-head">
-            <div>
-              <span className="eyebrow">GENERATED CODE</span>
-              <h2>Script</h2>
+      <main
+        style={{
+          gridTemplateColumns: `${isLeftCollapsed ? '28px' : '320px'} 1fr ${isRightCollapsed ? '28px' : 'var(--drawer-width)'}`,
+        }}
+      >
+        {/* Left Script Pane (Polish F4: Collapsible Rail) */}
+        {isLeftCollapsed ? (
+          <aside className="script-pane collapsed-rail" title="Expand Script Pane">
+            <button
+              className="rail-toggle-btn"
+              onClick={() => {
+                if (isFocusActive) setFocusMode(false);
+                setLeftCollapsed(false);
+              }}
+              aria-label="Expand Script Pane"
+            >
+              ›
+            </button>
+            <span className="rail-label">SCRIPT</span>
+          </aside>
+        ) : (
+          <aside className="script-pane" ref={scriptContainerRef as any} style={{ position: 'relative' }}>
+            <button
+              className="pane-collapse-btn left"
+              onClick={() => setLeftCollapsed(true)}
+              aria-label="Collapse Script Pane"
+              title="Collapse Script Pane"
+            >
+              ‹
+            </button>
+            <div className="pane-head">
+              <div>
+                <span className="eyebrow">GENERATED CODE</span>
+                <h2>Script</h2>
+              </div>
+              <span className="badge">TS</span>
             </div>
-            <span className="badge">TS</span>
-          </div>
-          <p className="pane-note">Written by Gemini. Runs in sandbox with MCP wrapper.</p>
+            <p className="pane-note">Written by Gemini. Runs in sandbox with MCP wrapper.</p>
 
-          <div className="script-scroll-area">
-            {rawEvents
-              .filter((e) => e.type === 'model_turn')
-              .map((m) => (
-                <section className="round" key={m.id}>
-                  <div className="round-title">
-                    <span>ROUND {m.round}</span>
-                    <span>MODEL TURN</span>
-                  </div>
-                  {m.script?.map((l: { n: number; code: string }) => {
-                    const isSelected = detail?.node?.line === l.n;
-                    return (
-                      <button
-                        key={l.n}
-                        data-line={l.n}
-                        className={`code-line ${isSelected ? 'selected' : ''}`}
-                        onClick={() => {
-                          const target = graph.nodes.find((n) => n.line === l.n);
-                          if (target) selectNode(target.id);
-                        }}
-                        title={`Line ${l.n}`}
-                      >
-                        <span className="line-num">{String(l.n).padStart(2, '0')}</span>
-                        <code>{l.code}</code>
-                      </button>
-                    );
-                  })}
-                </section>
-              ))}
-          </div>
-        </aside>
+            <div className="script-scroll-area">
+              {rawEvents
+                .filter((e) => e.type === 'model_turn')
+                .map((m) => (
+                  <section className="round" key={m.id}>
+                    <div className="round-title">
+                      <span>ROUND {m.round}</span>
+                      <span>MODEL TURN</span>
+                    </div>
+                    {m.script?.map((l: { n: number; code: string }) => {
+                      const isSelected = detail?.node?.line === l.n;
+                      return (
+                        <button
+                          key={l.n}
+                          data-line={l.n}
+                          className={`code-line ${isSelected ? 'selected' : ''}`}
+                          onClick={() => {
+                            const target = graph.nodes.find((n) => n.line === l.n);
+                            if (target) selectNode(target.id);
+                          }}
+                          title={`Line ${l.n}`}
+                        >
+                          <span className="line-num">{String(l.n).padStart(2, '0')}</span>
+                          <code>{l.code}</code>
+                        </button>
+                      );
+                    })}
+                  </section>
+                ))}
+            </div>
+          </aside>
+        )}
 
         {/* Center Stage */}
         <section className="stage">
@@ -590,7 +752,7 @@ export function App() {
                   transformOrigin: 'top left',
                 }}
               >
-                {/* Round Headers & Vertical Dividers (Spec 4c) */}
+                {/* Round Headers & Vertical Dividers (Polish L1) */}
                 {roundInfo.map((r) => (
                   <div
                     key={`round-${r.round}`}
@@ -601,10 +763,11 @@ export function App() {
                   </div>
                 ))}
 
-                {/* Lane Tracks & Explanations (Spec 1, 5c) */}
+                {/* Lane Tracks & Explanations (Polish P2: YOU lane clamped subtitle) */}
                 {graph.lanes.map((lane) => {
                   const laneTop = layout.laneTopMap[lane] ?? 20;
-                  const laneHeight = layout.laneHeightMap[lane] ?? 140;
+                  const laneHeight = layout.laneHeightMap[lane] ?? 130;
+                  const laneSub = lane === 'YOU' ? promptText : (LANE_SUBTITLES[lane] ?? 'MCP server');
 
                   return (
                     <div
@@ -616,7 +779,12 @@ export function App() {
                     >
                       <div className="lane-header">
                         <b>{lane.toUpperCase()}</b>
-                        <span className="lane-desc">{LANE_SUBTITLES[lane] ?? 'MCP server'}</span>
+                        <span
+                          className={`lane-desc ${lane === 'YOU' ? 'clamp-2' : ''}`}
+                          title={laneSub}
+                        >
+                          {laneSub}
+                        </span>
                         {lane === 'MODEL' && (
                           <span className="token-pill">{fmt(graph.summary?.model_tokens ?? 0)} tok context</span>
                         )}
@@ -628,7 +796,7 @@ export function App() {
                   );
                 })}
 
-                {/* SVG Connecting Wires & Tooltips (Spec 2, 3) */}
+                {/* SVG Orthogonal Connecting Wires (Polish L2, R1) */}
                 <svg
                   className="wires"
                   width={layout.totalWidth}
@@ -707,36 +875,14 @@ export function App() {
                   {graph.edges
                     .filter((e) => visibleNodeIds.has(e.from) && visibleNodeIds.has(e.to))
                     .map((e, index) => {
-                      const posA = layout.pos[e.from];
-                      const posB = layout.pos[e.to];
-                      if (!posA || !posB) return null;
-
-                      const isLit = detail?.edges.includes(e) ?? false;
+                      const isLit =
+                        detail !== null &&
+                        detail.edges.some(
+                          (x) => x.from === e.from && x.to === e.to && x.kind === e.kind,
+                        );
                       const isFaded = detail !== null && !isLit;
-
-                      let d = '';
-                      // Same column connector (Spec 2)
-                      if (posA.x === posB.x) {
-                        if (posA.y < posB.y) {
-                          const x = posA.x + NODE_WIDTH / 2;
-                          const y1 = posA.y + NODE_HEIGHT;
-                          const y2 = posB.y;
-                          d = `M ${x} ${y1} L ${x} ${y2}`;
-                        } else {
-                          const x = posA.x + NODE_WIDTH / 2;
-                          const y1 = posA.y;
-                          const y2 = posB.y + NODE_HEIGHT;
-                          d = `M ${x} ${y1} L ${x} ${y2}`;
-                        }
-                      } else {
-                        // Smooth curve from right side of source to left side of target (Spec 2)
-                        const x1 = posA.x + NODE_WIDTH;
-                        const y1 = posA.y + NODE_HEIGHT / 2;
-                        const x2 = posB.x;
-                        const y2 = posB.y + NODE_HEIGHT / 2;
-                        const dx = Math.max(30, (x2 - x1) / 2);
-                        d = `M ${x1} ${y1} C ${x1 + dx} ${y1}, ${x2 - dx} ${y2}, ${x2} ${y2}`;
-                      }
+                      const pathD = layout.edgePaths[`${e.from}-${e.to}-${e.kind}`];
+                      if (!pathD) return null;
 
                       const tooltipText = e.via ? `${e.label} · ${e.via}` : e.label;
 
@@ -745,14 +891,14 @@ export function App() {
                           key={`${e.from}-${e.to}-${index}`}
                           className={`wire ${e.kind} ${isFaded ? 'faded' : ''} ${isLit ? 'lit' : ''}`}
                         >
-                          <path d={d} markerEnd={`url(#arrow-${e.kind})`} />
+                          <path d={pathD} markerEnd={`url(#arrow-${e.kind})`} />
                           <title>{tooltipText}</title>
                         </g>
                       );
                     })}
                 </svg>
 
-                {/* Visible Node Cards (Spec 1, 5a) */}
+                {/* Visible Node Cards (Polish L1, R1, F1) */}
                 <div className="node-layer">
                   {visibleNodes.map((n) => {
                     const pos = layout.pos[n.id];
@@ -760,6 +906,7 @@ export function App() {
 
                     const isSelected = selectedId === n.id;
                     const isDim = detail !== null && !detail.lit.has(n.id);
+                    const isJustRevealed = justRevealedId === n.id;
 
                     return (
                       <button
@@ -767,7 +914,7 @@ export function App() {
                         style={{ left: pos.x, top: pos.y, width: NODE_WIDTH, minHeight: NODE_HEIGHT }}
                         className={`node-card kind-${n.kind} chip-${n.chip.toLowerCase()} ${
                           isSelected ? 'selected' : ''
-                        } ${isDim ? 'dim' : ''}`}
+                        } ${isDim ? 'dim' : ''} ${isJustRevealed ? 'just-revealed' : ''}`}
                         onClick={() => selectNode(n.id)}
                         title={`Step ${n.step}: ${n.title}`}
                       >
@@ -784,11 +931,30 @@ export function App() {
                       </button>
                     );
                   })}
+
+                  {/* Pulsing Placeholder while waiting for Gemini (Polish F2) */}
+                  {isWaitingForGemini && (
+                    <div
+                      className="node-card kind-model_turn placeholder-writing"
+                      style={{
+                        left: LEFT_OFFSET + layout.maxCol * COLUMN_WIDTH,
+                        top: (layout.laneTopMap['MODEL'] ?? 20) + 44,
+                        width: NODE_WIDTH,
+                        minHeight: NODE_HEIGHT,
+                      }}
+                    >
+                      <div className="node-card-top">
+                        <span className="status-chip chip-sent">WRITING</span>
+                      </div>
+                      <strong className="node-title">Gemini is writing code… (round {waitingRound})</strong>
+                      <span className="node-sub">Generating TypeScript in sandbox...</span>
+                    </div>
+                  )}
                 </div>
               </div>
             </div>
           ) : (
-            /* Strace Log View */
+            /* Strace Log View (Polish R2: Colour-coded tags) */
             <div className="strace-log">
               {visibleNodes.map((n) => {
                 const isSelected = selectedId === n.id;
@@ -801,7 +967,7 @@ export function App() {
                     <span className="strace-time">
                       {n.event.t !== undefined ? `${n.event.t}ms` : `s${n.step}`}
                     </span>
-                    <span className={`strace-type ${n.kind}`}>
+                    <span className={`strace-type status-chip chip-${n.chip.toLowerCase()}`}>
                       {n.chip}
                     </span>
                     <span className="strace-title">{n.title}</span>
@@ -875,8 +1041,22 @@ export function App() {
           </div>
         </section>
 
-        {/* Right Drawer: Story (when nothing selected) OR Detail (when selected) (Spec 5b, 5d) */}
-        {detail?.node ? (
+        {/* Right Drawer: Story OR Detail (Polish F4: Collapsible Rail, Polish P1, P2) */}
+        {isRightCollapsed ? (
+          <aside className="drawer collapsed-rail" title="Expand Details Pane">
+            <button
+              className="rail-toggle-btn"
+              onClick={() => {
+                if (isFocusActive) setFocusMode(false);
+                setRightCollapsed(false);
+              }}
+              aria-label="Expand Details Pane"
+            >
+              ‹
+            </button>
+            <span className="rail-label">{detail?.node ? 'DETAIL' : 'STORY'}</span>
+          </aside>
+        ) : detail?.node ? (
           <DetailDrawer
             node={detail.node}
             inspection={detail}
@@ -884,9 +1064,14 @@ export function App() {
             runEvents={rawEvents}
             onPick={selectNode}
             onClose={() => setSelectedId(null)}
+            onCollapse={() => setRightCollapsed(true)}
           />
         ) : (
-          <StoryDrawer story={runStory} onPick={selectNode} />
+          <StoryDrawer
+            story={runStory}
+            onPick={selectNode}
+            onCollapse={() => setRightCollapsed(true)}
+          />
         )}
       </main>
 
@@ -909,16 +1094,54 @@ export function App() {
   );
 }
 
-// STORY Drawer when nothing is selected (Spec 5b)
+// Script Code Block with Line Numbers & Truncation (Polish P1)
+function ScriptCodeBlock({ script }: { script: Array<{ n: number; code: string }> }) {
+  const [showAll, setShowAll] = useState<boolean>(false);
+  const isLong = script.length > 12;
+  const visible = isLong && !showAll ? script.slice(0, 12) : script;
+
+  return (
+    <div className="script-code-block-container">
+      <div className="code-block-with-gutter">
+        {visible.map((l) => (
+          <div key={l.n} className="gutter-code-line">
+            <span className="gutter-line-num">{String(l.n).padStart(2, '0')}</span>
+            <span className="gutter-code-text">{l.code}</span>
+          </div>
+        ))}
+      </div>
+      {isLong && (
+        <button
+          className="show-all-lines-btn"
+          onClick={() => setShowAll((s) => !s)}
+        >
+          {showAll ? 'Show fewer lines' : `Show all ${script.length} lines`}
+        </button>
+      )}
+    </div>
+  );
+}
+
+// STORY Drawer when nothing is selected (Polish P1, P2)
 function StoryDrawer({
   story: s,
   onPick,
+  onCollapse,
 }: {
   story: ReturnType<typeof story>;
   onPick: (id: string) => void;
+  onCollapse: () => void;
 }) {
   return (
-    <aside className="drawer story-drawer">
+    <aside className="drawer story-drawer" style={{ position: 'relative' }}>
+      <button
+        className="pane-collapse-btn right"
+        onClick={onCollapse}
+        aria-label="Collapse Story Pane"
+        title="Collapse Story Pane"
+      >
+        ›
+      </button>
       <div className="drawer-top">
         <div>
           <span className="eyebrow">RUN SUMMARY</span>
@@ -951,7 +1174,7 @@ function StoryDrawer({
   );
 }
 
-// Detail Drawer when a node is selected (Spec 3, 5d)
+// Detail Drawer when a node is selected (Polish P1, P2)
 function DetailDrawer({
   node,
   inspection,
@@ -959,6 +1182,7 @@ function DetailDrawer({
   runEvents,
   onPick,
   onClose,
+  onCollapse,
 }: {
   node: Node;
   inspection: ReturnType<typeof inspect>;
@@ -966,11 +1190,20 @@ function DetailDrawer({
   runEvents: RunEvent[];
   onPick: (id: string) => void;
   onClose: () => void;
+  onCollapse: () => void;
 }) {
   const e = node.event;
 
   return (
-    <aside className="drawer">
+    <aside className="drawer" style={{ position: 'relative' }}>
+      <button
+        className="pane-collapse-btn right"
+        onClick={onCollapse}
+        aria-label="Collapse Details Pane"
+        title="Collapse Details Pane"
+      >
+        ›
+      </button>
       <div className="drawer-top">
         <div>
           <span className="eyebrow">INSPECTING {node.kind.toUpperCase().replace('_', ' ')}</span>
@@ -981,7 +1214,7 @@ function DetailDrawer({
         </button>
       </div>
 
-      {/* 1 to 3 Plain Sentences (Spec 5d) */}
+      {/* 1 to 3 Plain Sentences */}
       <div className="plain-summary-box">
         {inspection.plainSummary.map((sentence, idx) => (
           <p key={idx} className="answer-p">
@@ -990,7 +1223,7 @@ function DetailDrawer({
         ))}
       </div>
 
-      {/* Repeated Calls Breakdown (Spec 4b) */}
+      {/* Repeated Calls Breakdown */}
       {node.repeatedEvents && node.repeatedEvents.length > 1 && (
         <div className="repeats-section">
           <h3>REPEATED CALLS ({node.repeatedEvents.length})</h3>
@@ -1005,7 +1238,7 @@ function DetailDrawer({
         </div>
       )}
 
-      {/* Traced Values List (Spec 3) */}
+      {/* Traced Values List */}
       {inspection.tracedValues.length > 0 && (
         <div className="traced-values-section">
           <h3>TRACED VALUES</h3>
@@ -1025,7 +1258,7 @@ function DetailDrawer({
         </div>
       )}
 
-      {/* Arguments & Sources (Spec 5d) */}
+      {/* Arguments & Sources */}
       {(node.kind === 'call' || node.kind === 'blocked') && (
         <>
           <h3>
@@ -1080,7 +1313,7 @@ function DetailDrawer({
         </>
       )}
 
-      {/* Model Turn Details */}
+      {/* Model Turn Details (Polish P1: Gutter + Truncation) */}
       {node.kind === 'model_turn' && (
         <>
           <details open>
@@ -1101,7 +1334,7 @@ function DetailDrawer({
           </details>
 
           <h3>SCRIPT WRITTEN</h3>
-          <pre>{e.script?.map((l: any) => `${String(l.n).padStart(2, '0')}  ${l.code}`).join('\n')}</pre>
+          <ScriptCodeBlock script={e.script ?? []} />
         </>
       )}
 

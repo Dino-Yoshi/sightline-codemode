@@ -38,6 +38,7 @@ export type Node = {
   id: string;
   lane: string;
   step: number;
+  column?: number;
   round?: number;
   line?: number;
   title: string;
@@ -144,8 +145,8 @@ function getNodeTitleAndSubtitle(
   let chip: StatusChip = 'PUBLIC';
 
   if (e.type === 'prompt') {
-    title = 'Your request';
-    subtitle = e.text ? (e.text.length > 40 ? e.text.slice(0, 37) + '…' : e.text) : `${e.tokens ?? 0} tokens`;
+    title = 'You asked';
+    subtitle = e.text ? `"${e.text}"` : `${e.tokens ?? 0} tokens`;
     chip = 'PUBLIC';
   } else if (e.type === 'model_turn') {
     title = e.round ? `Gemini wrote a script (round ${e.round})` : 'Gemini wrote a script';
@@ -226,6 +227,82 @@ function getNodeTitleAndSubtitle(
   }
 
   return { title, subtitle, chip };
+}
+
+export function computeColumns(nodes: Node[], edges: Edge[]): Map<string, number> {
+  const nodeMap = new Map(nodes.map((n) => [n.id, n]));
+  const incomingMap = new Map<string, Edge[]>();
+  for (const n of nodes) incomingMap.set(n.id, []);
+  for (const e of edges) {
+    if (incomingMap.has(e.to)) incomingMap.get(e.to)!.push(e);
+  }
+
+  const columns = new Map<string, number>();
+  const visiting = new Set<string>();
+
+  function getCol(id: string): number {
+    if (columns.has(id)) return columns.get(id)!;
+    if (visiting.has(id)) return 1;
+    visiting.add(id);
+
+    const n = nodeMap.get(id);
+    const inEdges = incomingMap.get(id) ?? [];
+
+    let maxInputCol = 0;
+    if (n?.repeatedEvents && n.repeatedEvents.length > 1) {
+      const lastEvent = n.repeatedEvents[n.repeatedEvents.length - 1];
+      const lastStep = lastEvent.step;
+      const lastInEdges = inEdges.filter((e) => {
+        const fromNode = nodeMap.get(e.from);
+        return fromNode ? fromNode.step <= lastStep : true;
+      });
+      const relevantEdges = lastInEdges.length > 0 ? lastInEdges : inEdges;
+      for (const e of relevantEdges) {
+        if (e.from !== id) {
+          maxInputCol = Math.max(maxInputCol, getCol(e.from));
+        }
+      }
+    } else {
+      for (const e of inEdges) {
+        if (e.from !== id) {
+          maxInputCol = Math.max(maxInputCol, getCol(e.from));
+        }
+      }
+    }
+
+    visiting.delete(id);
+    const col = maxInputCol === 0 ? 1 : maxInputCol + 1;
+    columns.set(id, col);
+    return col;
+  }
+
+  for (const n of nodes) {
+    getCol(n.id);
+  }
+
+  for (const n of nodes) {
+    if (n.kind === 'prompt') {
+      columns.set(n.id, 1);
+    }
+  }
+
+  // Relaxation to guarantee strictly left-to-right edges
+  let changed = true;
+  let iters = 0;
+  while (changed && iters < 50) {
+    changed = false;
+    iters++;
+    for (const e of edges) {
+      const cFrom = columns.get(e.from) ?? 1;
+      const cTo = columns.get(e.to) ?? 1;
+      if (cTo <= cFrom) {
+        columns.set(e.to, cFrom + 1);
+        changed = true;
+      }
+    }
+  }
+
+  return columns;
 }
 
 export function view(run: RunEvent[], options: ViewOptions = {}): View {
@@ -377,6 +454,11 @@ export function view(run: RunEvent[], options: ViewOptions = {}): View {
     const validEdges = rawEdges.filter((e) => validNodeIds.has(e.from) && validNodeIds.has(e.to));
     const steps = [...new Set(run.map((e) => e.step))].sort((a, b) => a - b);
     const summary = run.find((e) => e.type === 'summary');
+
+    const cols = computeColumns(rawNodes, validEdges);
+    for (const n of rawNodes) {
+      n.column = cols.get(n.id) ?? 1;
+    }
 
     return {
       nodes: rawNodes,
@@ -554,6 +636,11 @@ export function view(run: RunEvent[], options: ViewOptions = {}): View {
   const steps = [...new Set(run.map((e) => e.step))].sort((a, b) => a - b);
   const summary = run.find((e) => e.type === 'summary');
 
+  const cols = computeColumns(finalNodes, finalEdges);
+  for (const n of finalNodes) {
+    n.column = cols.get(n.id) ?? 1;
+  }
+
   return {
     nodes: finalNodes,
     edges: finalEdges,
@@ -610,7 +697,9 @@ export function inspect(v: View, id: string, mode: Mode = 'lineage', step = Infi
     (e) =>
       visible.has(e.from) &&
       visible.has(e.to) &&
-      ((down.has(e.from) && down.has(e.to)) || (up.has(e.from) && up.has(e.to))),
+      ((down.has(e.from) && down.has(e.to)) ||
+        (up.has(e.from) && up.has(e.to)) ||
+        (up.has(e.from) && down.has(e.to))),
   );
 
   const args: ArgumentInspection[] = Object.entries(node.event.args ?? {}).map(([name, arg]) => ({

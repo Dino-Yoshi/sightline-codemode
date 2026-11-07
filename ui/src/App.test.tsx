@@ -1,6 +1,6 @@
 import React from 'react';
-import { describe, it, expect } from 'vitest';
-import { render, screen, fireEvent } from '@testing-library/react';
+import { describe, it, expect, vi } from 'vitest';
+import { render, screen, fireEvent, act } from '@testing-library/react';
 import { App } from './main';
 
 describe('App Component Integration Tests', () => {
@@ -143,5 +143,160 @@ describe('App Component Integration Tests', () => {
     const showEveryStepBtn = screen.getByText('Show every step');
     fireEvent.click(showEveryStepBtn);
     expect(screen.getByText('✓ Showing every step')).toBeInTheDocument();
+  });
+
+  // --- POLISH ROUND 2 SPEC TESTS ---
+
+  it('R1: Dims every node and edge not in the lineage when a node is selected', () => {
+    const { container } = render(<App />);
+    // Select blocked node c4 ("Post comment on #42")
+    const blockedNode = Array.from(container.querySelectorAll('.node-card.chip-blocked'))[0];
+    fireEvent.click(blockedNode);
+
+    // Node c3 ("Send summary to HR") is not in c4 lineage -> must have dim class
+    const hrNode = Array.from(container.querySelectorAll('.node-card')).find((el) =>
+      el.textContent?.includes('Send summary to HR'),
+    );
+    expect(hrNode).toBeDefined();
+    expect(hrNode).toHaveClass('dim');
+
+    // Node c4 itself and its lineage (e.g. "Sum the gross pay") must NOT have dim class
+    expect(blockedNode).not.toHaveClass('dim');
+    expect(blockedNode).toHaveClass('selected');
+
+    const sumNode = Array.from(container.querySelectorAll('.node-card')).find((el) =>
+      el.textContent?.includes('Sum the gross pay'),
+    );
+    expect(sumNode).toBeDefined();
+    expect(sumNode).not.toHaveClass('dim');
+
+    // Check SVG wires dimming: faded for non-lineage, lit for lineage
+    const wires = Array.from(container.querySelectorAll('svg.wires g.wire'));
+    expect(wires.some((w) => w.classList.contains('faded'))).toBe(true);
+    expect(wires.some((w) => w.classList.contains('lit'))).toBe(true);
+  });
+
+  it('R2: Color-codes tags in strace view with status-chip classes', () => {
+    const { container } = render(<App />);
+    const straceTab = screen.getByText('strace');
+    fireEvent.click(straceTab);
+
+    const straceChips = container.querySelectorAll('.strace-row .strace-type');
+    expect(straceChips.length).toBeGreaterThan(0);
+
+    // Check that chip classes like chip-blocked, chip-private, chip-untrusted are applied
+    const chipClasses = Array.from(straceChips).map((el) => el.className);
+    expect(chipClasses.some((c) => c.includes('chip-blocked'))).toBe(true);
+    expect(chipClasses.some((c) => c.includes('chip-private'))).toBe(true);
+    expect(chipClasses.some((c) => c.includes('status-chip'))).toBe(true);
+  });
+
+  it('L1 & L2: Positions nodes with left-to-right columns and renders orthogonal edge paths', () => {
+    const { container } = render(<App />);
+    const cards = Array.from(container.querySelectorAll('.node-card')) as HTMLElement[];
+    expect(cards.length).toBeGreaterThan(0);
+
+    // Prompt node should be on the leftmost column (left = 170px)
+    const promptCard = cards.find((c) => c.textContent?.includes('You asked'));
+    expect(promptCard).toBeDefined();
+    expect(promptCard?.style.left).toBe('170px');
+
+    // Wires have orthogonal path commands (M, L, Q)
+    const wirePaths = Array.from(container.querySelectorAll('svg.wires g.wire path'));
+    expect(wirePaths.length).toBeGreaterThan(0);
+    const dAttrs = wirePaths.map((p) => p.getAttribute('d') ?? '');
+    expect(dAttrs.some((d) => d.includes('M') && d.includes('L'))).toBe(true);
+  });
+
+  it('L4: Handles Fit toggle with scaling', () => {
+    render(<App />);
+    const fitBtn = screen.getByTitle('Zoom graph to fit view');
+    expect(fitBtn).toBeInTheDocument();
+    fireEvent.click(fitBtn);
+    expect(fitBtn).toHaveTextContent('100%');
+    fireEvent.click(fitBtn);
+    expect(fitBtn).toHaveTextContent('Fit');
+  });
+
+  it('F1: Smoothly centers newest node on auto-follow during replay', () => {
+    const scrollSpy = vi.spyOn(Element.prototype, 'scrollTo');
+    const { container } = render(<App />);
+
+    // Click next step
+    const nextBtn = screen.getByLabelText('Next step');
+    fireEvent.click(nextBtn);
+
+    // scrollTo should be invoked by autoFollow
+    expect(scrollSpy).toHaveBeenCalled();
+    scrollSpy.mockRestore();
+  });
+
+  it('F4: Allows collapsing both side panes manually and toggles Focus mode', () => {
+    const { container } = render(<App />);
+
+    // Focus toggle button exists and defaults to on
+    const focusBtn = screen.getByTitle('Auto-collapse side panes during playback');
+    expect(focusBtn).toHaveTextContent('✓ Focus on');
+
+    // Collapse left script pane manually
+    const collapseScriptBtn = screen.getByLabelText('Collapse Script Pane');
+    fireEvent.click(collapseScriptBtn);
+
+    // Script pane should now be a 28px rail
+    expect(container.querySelector('.script-pane.collapsed-rail')).toBeInTheDocument();
+    expect(screen.getByLabelText('Expand Script Pane')).toBeInTheDocument();
+
+    // Expand script pane again
+    fireEvent.click(screen.getByLabelText('Expand Script Pane'));
+    expect(container.querySelector('.script-pane:not(.collapsed-rail)')).toBeInTheDocument();
+
+    // Collapse right detail/story drawer manually
+    const collapseStoryBtn = screen.getByLabelText('Collapse Story Pane');
+    fireEvent.click(collapseStoryBtn);
+    expect(container.querySelector('.drawer.collapsed-rail')).toBeInTheDocument();
+    expect(screen.getByLabelText('Expand Details Pane')).toBeInTheDocument();
+  });
+
+  it('P1: Truncates scripts longer than 12 lines in Model Turn detail with show all lines toggle', () => {
+    const { container } = render(<App />);
+
+    // Switch to Run A which has model turns with scripts
+    const runABtn = screen.getByText('Run A (4 Rounds)');
+    fireEvent.click(runABtn);
+
+    // Click on Model Turn 4 which has a 19-line script
+    const modelNode = Array.from(container.querySelectorAll('.node-card')).find((el) =>
+      el.textContent?.includes('round 4'),
+    );
+    expect(modelNode).toBeDefined();
+    fireEvent.click(modelNode!);
+
+    // Should render ScriptCodeBlock with show all lines button
+    const showAllBtn = screen.getByText(/Show all 19 lines/);
+    expect(showAllBtn).toBeInTheDocument();
+
+    // Click to expand
+    fireEvent.click(showAllBtn);
+    expect(screen.getByText('Show fewer lines')).toBeInTheDocument();
+  });
+
+  it('P2: Displays actual prompt text on YOU node, Story sentence 1, and clamped in YOU lane header', () => {
+    const { container } = render(<App />);
+
+    // YOU node card shows "You asked" and prompt text
+    const youNode = Array.from(container.querySelectorAll('.node-card')).find((el) =>
+      el.textContent?.includes('You asked'),
+    );
+    expect(youNode).toBeDefined();
+    expect(youNode?.textContent).toContain("Triage this week's open issues");
+
+    // Story sentence 1 shows "1. You asked: ..."
+    expect(screen.getByText(/1\. You asked: "Triage this week's open issues/)).toBeInTheDocument();
+
+    // YOU lane subtitle in header is clamped and has tooltip
+    const youLaneDesc = container.querySelector('.lane-desc.clamp-2');
+    expect(youLaneDesc).toBeDefined();
+    expect(youLaneDesc).toHaveAttribute('title');
+    expect(youLaneDesc?.getAttribute('title')).toContain("Triage this week's open issues");
   });
 });

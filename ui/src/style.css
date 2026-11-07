@@ -588,6 +588,16 @@ main {
   color: var(--d);
 }
 
+.lane-desc.clamp-2 {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 140px;
+  line-height: 1.25;
+}
+
 .token-pill {
   font: 600 10px/1 var(--mono);
   padding: 2px 7px;
@@ -637,8 +647,16 @@ main {
   stroke-width: 2.5px;
 }
 
+.wire.faded {
+  opacity: 0.15;
+}
+
 .wire.faded path {
   opacity: 0.15;
+}
+
+.wire.lit {
+  opacity: 1;
 }
 
 .wire.lit path {
@@ -654,6 +672,32 @@ main {
   width: 100%;
   height: 100%;
   z-index: 5;
+}
+
+@keyframes node-pulse {
+  0% {
+    box-shadow: 0 0 0 0 rgba(108, 168, 255, 0.8), 0 0 20px rgba(108, 168, 255, 0.4);
+    transform: scale(1.04);
+  }
+  50% {
+    box-shadow: 0 0 0 6px rgba(108, 168, 255, 0.3), 0 0 24px rgba(108, 168, 255, 0.6);
+    transform: scale(1.02);
+  }
+  100% {
+    box-shadow: none;
+    transform: scale(1);
+  }
+}
+
+@keyframes writing-pulse {
+  0%, 100% {
+    border-color: var(--blue);
+    box-shadow: 0 0 12px rgba(108, 168, 255, 0.4);
+  }
+  50% {
+    border-color: rgba(108, 168, 255, 0.3);
+    box-shadow: 0 0 4px rgba(108, 168, 255, 0.1);
+  }
 }
 
 .node-card {
@@ -685,6 +729,15 @@ main {
 
 .node-card.dim {
   opacity: 0.25;
+}
+
+.node-card.just-revealed {
+  animation: node-pulse 0.6s ease-out;
+}
+
+.node-card.placeholder-writing {
+  animation: writing-pulse 1.5s infinite ease-in-out;
+  border-style: dashed;
 }
 
 .node-card-top {
@@ -803,8 +856,6 @@ main {
   font: 700 9.5px/1 var(--mono);
   padding: 2px 6px;
   border-radius: 4px;
-  background: var(--p3);
-  color: var(--m);
 }
 
 .strace-title {
@@ -907,7 +958,90 @@ main {
 }
 
 /* ==========================================================================
-   Right Drawer: Story & Detail (Spec 3, 5b, 5d)
+   Collapsible Rails & Focus Mode (Polish F4)
+   ========================================================================== */
+
+.collapsed-rail {
+  width: 28px !important;
+  min-width: 28px !important;
+  max-width: 28px !important;
+  padding: 10px 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  background: var(--bg-subtle);
+  border-right: 1px solid var(--b);
+  overflow: hidden;
+  cursor: pointer;
+  transition: width 0.2s ease;
+  user-select: none;
+}
+
+.drawer.collapsed-rail {
+  border-right: none;
+  border-left: 1px solid var(--b);
+}
+
+.rail-toggle-btn {
+  width: 20px;
+  height: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--m);
+  border-radius: 3px;
+  font-size: 14px;
+  margin-bottom: 14px;
+}
+
+.rail-toggle-btn:hover {
+  color: var(--t);
+  background: var(--p3);
+}
+
+.rail-label {
+  writing-mode: vertical-rl;
+  text-orientation: mixed;
+  transform: rotate(180deg);
+  font: 700 10px/1 var(--mono);
+  letter-spacing: 0.1em;
+  color: var(--d);
+}
+
+.pane-collapse-btn {
+  position: absolute;
+  top: 10px;
+  background: var(--p2);
+  border: 1px solid var(--b);
+  color: var(--m);
+  width: 20px;
+  height: 20px;
+  border-radius: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 13px;
+  cursor: pointer;
+  z-index: 10;
+  transition: all 0.15s;
+}
+
+.pane-collapse-btn.left {
+  right: 10px;
+}
+
+.pane-collapse-btn.right {
+  left: 10px;
+}
+
+.pane-collapse-btn:hover {
+  color: var(--t);
+  background: var(--p3);
+  border-color: var(--slate);
+}
+
+/* ==========================================================================
+   Right Drawer: Story & Detail (Spec 3, 5b, 5d, Polish P1)
    ========================================================================== */
 
 .drawer {
@@ -915,9 +1049,79 @@ main {
   border-left: 1px solid var(--b2);
   display: flex;
   flex-direction: column;
+  overflow-x: hidden;
   overflow-y: auto;
+  overflow-wrap: anywhere;
+  word-break: break-word;
   padding: 16px;
   height: 100%;
+}
+
+.drawer * {
+  overflow-wrap: anywhere;
+}
+
+.drawer pre,
+.drawer code {
+  white-space: pre-wrap;
+  word-break: break-all;
+  overflow-x: hidden;
+}
+
+.code-block-with-gutter {
+  background: var(--p);
+  border: 1px solid var(--b);
+  border-radius: 6px;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  line-height: 1.5;
+  overflow-x: hidden;
+  padding: 6px 0;
+}
+
+.gutter-code-line {
+  display: flex;
+  align-items: flex-start;
+  padding: 2px 8px;
+}
+
+.gutter-code-line:hover {
+  background: var(--p2);
+}
+
+.gutter-line-num {
+  color: var(--d);
+  user-select: none;
+  width: 26px;
+  flex-shrink: 0;
+  text-align: right;
+  padding-right: 8px;
+  font-size: 11px;
+}
+
+.gutter-code-text {
+  flex: 1;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--t);
+}
+
+.show-all-lines-btn {
+  margin-top: 6px;
+  font: 600 11px/1 var(--sans);
+  color: var(--blue);
+  background: var(--blue-bg);
+  padding: 6px 10px;
+  border-radius: 4px;
+  border: 1px solid rgba(108, 168, 255, 0.2);
+  width: 100%;
+  text-align: center;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.show-all-lines-btn:hover {
+  background: rgba(108, 168, 255, 0.2);
 }
 
 .drawer-top {
