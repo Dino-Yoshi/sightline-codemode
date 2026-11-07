@@ -13,8 +13,8 @@ import { type ServerPolicy } from './policy.js';
 import { wrapTools, type McpClients, type CodeModeTools, type RunEvent as ObserverRunEvent } from './observer.js';
 
 export const DEMO_TASKS = {
-  A: "Triage this week's open issues and send the October payroll total to HR.",
-  B: 'Post the October payroll total on issue #42 and send it to HR.',
+  A: "Triage this week's open issues and send the October 2026 (2026-10) payroll total to HR. Do it in one script.",
+  B: 'Post the October 2026 (2026-10) payroll total as a comment on issue #42 and send it to HR. Do it in one script.',
 } as const;
 
 type JsonSchema = { type: 'object'; properties: Record<string, object>; required?: string[] };
