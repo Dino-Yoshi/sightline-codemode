@@ -189,8 +189,7 @@ export function extractHiddenInstruction(text?: string): string | null {
   const commentMatch = text.match(/<!--\s*AI assistant:\s*([\s\S]*?)-->/i);
   if (commentMatch) {
     const raw = commentMatch[1].trim();
-    const short = raw.length > 40 ? raw.slice(0, 37) + '…' : raw;
-    return `Issue #42 hides an instruction: "${short}"`;
+    return `Issue #42 hides an instruction: "${raw}"`;
   }
   if (/addressed to AI assistants/i.test(text) || /hidden (?:text|instruction)/i.test(text)) {
     if (text.includes('#42') || text.includes('42')) {
@@ -1129,3 +1128,200 @@ export function story(v: View, promptTextOverride?: string): Story {
     contextBoundary,
   };
 }
+
+export type RoundSummary = {
+  round: number;
+  callCount: number;
+  privateCount: number;
+  blockedCount: number;
+  untrustedCount: number;
+  nodeCount: number;
+  label: string; // e.g. "Round 2 · 6 calls · 1 private"
+  hasSensitive: boolean; // has PRIVATE, BLOCKED, or UNTRUSTED
+};
+
+export function getRoundSummary(v: { nodes: Node[] }, round: number): RoundSummary {
+  const roundNodes = v.nodes.filter((n) => (n.round ?? 1) === round);
+  const callCount = roundNodes.filter((n) => n.kind === 'call' || n.kind === 'blocked').length;
+  const privateCount = roundNodes.filter((n) => n.chip === 'PRIVATE').length;
+  const blockedCount = roundNodes.filter((n) => n.chip === 'BLOCKED').length;
+  const untrustedCount = roundNodes.filter((n) => n.chip === 'UNTRUSTED').length;
+
+  const hasSensitive = privateCount > 0 || blockedCount > 0 || untrustedCount > 0;
+
+  const parts = [`Round ${round}`];
+  if (callCount > 0) {
+    parts.push(`${callCount} call${callCount === 1 ? '' : 's'}`);
+  } else {
+    parts.push(`${roundNodes.length} step${roundNodes.length === 1 ? '' : 's'}`);
+  }
+
+  if (privateCount > 0) {
+    parts.push(`${privateCount} private`);
+  } else if (blockedCount > 0) {
+    parts.push(`${blockedCount} blocked`);
+  } else if (untrustedCount > 0) {
+    parts.push(`${untrustedCount} untrusted`);
+  }
+
+  return {
+    round,
+    callCount,
+    privateCount,
+    blockedCount,
+    untrustedCount,
+    nodeCount: roundNodes.length,
+    label: parts.join(' · '),
+    hasSensitive,
+  };
+}
+
+export function getInitialCollapsedRounds(v: { nodes: Node[] }): Set<number> {
+  const allRounds = Array.from(new Set(v.nodes.map((n) => n.round ?? 1))).sort((a, b) => a - b);
+  const collapsed = new Set<number>();
+  if (allRounds.length > 3) {
+    for (const r of allRounds) {
+      const summary = getRoundSummary(v, r);
+      if (!summary.hasSensitive) {
+        collapsed.add(r);
+      }
+    }
+  }
+  return collapsed;
+}
+
+export type LineageChainStep = {
+  id: string;
+  label: string;
+  chip?: StatusChip;
+  line?: number;
+  isTarget?: boolean;
+  branches?: LineageChainStep[][];
+};
+
+export function formatLineageStepLabel(n: Node, isTarget = false, argName?: string): string {
+  if (isTarget) {
+    return argName ? `this call: ${argName}` : `this call (${n.title})`;
+  }
+  if (n.kind === 'call' || n.kind === 'blocked') {
+    const fnName = n.event.server && n.event.tool ? `${n.event.server}.${n.event.tool}` : n.title;
+    const details = [n.chip.toLowerCase()];
+    if (n.subtitle && !n.subtitle.includes('ms') && !n.subtitle.includes('call')) {
+      details.push(n.subtitle);
+    }
+    return `${fnName} (${details.join(', ')})`;
+  }
+  if (n.kind === 'value') {
+    return n.title;
+  }
+  if (n.kind === 'model_turn') {
+    return `Gemini script · Round ${n.round ?? 1}`;
+  }
+  return n.title;
+}
+
+export function buildLineageChains(v: View, targetId: string, visibleStep = Infinity): LineageChainStep[][] {
+  const visibleNodes = v.nodes.filter((n) => n.step <= visibleStep);
+  const visible = new Set(visibleNodes.map((n) => n.id));
+  const target = v.nodes.find((n) => n.id === targetId && visible.has(n.id));
+  if (!target) return [];
+
+  // Helper to build upstream chain for a given node
+  const getUpstreamPaths = (nodeId: string, visited = new Set<string>()): Node[][] => {
+    if (visited.has(nodeId)) return [];
+    const newVisited = new Set(visited).add(nodeId);
+    const curr = v.nodes.find((n) => n.id === nodeId && visible.has(n.id));
+    if (!curr) return [];
+
+    // Find direct parent node IDs
+    const parentIds = new Set<string>();
+    for (const e of v.edges) {
+      if (e.to === nodeId && visible.has(e.from) && e.from !== nodeId && e.kind !== 'write') {
+        parentIds.add(e.from);
+      }
+    }
+    // Also check event.from and args.from
+    if (curr.event.from) {
+      for (const f of curr.event.from) {
+        if (visible.has(f) && f !== nodeId) parentIds.add(f);
+      }
+    }
+    if (curr.event.args) {
+      for (const arg of Object.values(curr.event.args)) {
+        for (const f of arg.from ?? []) {
+          if (visible.has(f) && f !== nodeId) parentIds.add(f);
+        }
+      }
+    }
+
+    if (parentIds.size === 0) {
+      return [[curr]];
+    }
+
+    const allPaths: Node[][] = [];
+    for (const pId of parentIds) {
+      const upPaths = getUpstreamPaths(pId, newVisited);
+      for (const p of upPaths) {
+        allPaths.push([...p, curr]);
+      }
+    }
+    return allPaths.length > 0 ? allPaths : [[curr]];
+  };
+
+  // If target has arguments with distinct sources, build chains per argument
+  const argEntries = Object.entries(target.event.args ?? {});
+  if (argEntries.length > 0) {
+    const chains: LineageChainStep[][] = [];
+    for (const [argName, argData] of argEntries) {
+      const srcIds = (argData.from ?? []).filter((id) => visible.has(id));
+      if (srcIds.length === 0) {
+        chains.push([
+          {
+            id: 'literal',
+            label: `literal "${argData.preview}" in script`,
+            chip: 'PUBLIC',
+          },
+          {
+            id: target.id,
+            label: `this call: ${argName}`,
+            chip: target.chip,
+            isTarget: true,
+          },
+        ]);
+      } else {
+        for (const sId of srcIds) {
+          const paths = getUpstreamPaths(sId);
+          for (const path of paths) {
+            const stepList: LineageChainStep[] = path.map((n) => ({
+              id: n.id,
+              label: formatLineageStepLabel(n),
+              chip: n.chip,
+              line: n.line,
+            }));
+            stepList.push({
+              id: target.id,
+              label: `this call: ${argName}`,
+              chip: target.chip,
+              isTarget: true,
+            });
+            chains.push(stepList);
+          }
+        }
+      }
+    }
+    return chains;
+  }
+
+  // If not a call with arguments (e.g. value node or prompt)
+  const paths = getUpstreamPaths(target.id);
+  return paths.map((path) =>
+    path.map((n) => ({
+      id: n.id,
+      label: formatLineageStepLabel(n, n.id === target.id),
+      chip: n.chip,
+      line: n.line,
+      isTarget: n.id === target.id,
+    })),
+  );
+}
+

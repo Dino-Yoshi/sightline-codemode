@@ -8,16 +8,21 @@ import {
   parseRun,
   view,
   story,
+  getRoundSummary,
+  getInitialCollapsedRounds,
+  buildLineageChains,
   type Node,
   type Edge,
   type RunEvent,
+  type RoundSummary,
+  type LineageChainStep,
 } from './view';
 import './style.css';
 
 export const presetRuns: Record<string, { label: string; text: string }> = {
-  fake: { label: 'Fake Run (Demo)', text: fakeRunText },
-  runA: { label: 'Run A (4 Rounds)', text: runAText },
-  runB: { label: 'Run B (Blocked)', text: runBText },
+  fake: { label: 'Simulated: injection succeeds', text: fakeRunText },
+  runA: { label: 'Recorded live: A (triage + HR)', text: runAText },
+  runB: { label: 'Recorded live: B (honest mistake)', text: runBText },
 };
 
 const fmt = (n: number) => n.toLocaleString();
@@ -34,6 +39,7 @@ export const NODE_WIDTH = 220;
 export const NODE_HEIGHT = 80;
 export const CARD_GAP_Y = 14;
 export const COLUMN_WIDTH = 290;
+export const COLLAPSED_COLUMN_WIDTH = 160;
 export const GUTTER_WIDTH = 70;
 export const LEFT_OFFSET = 180;
 
@@ -103,12 +109,71 @@ export function getNodesForLine(graphNodes: Node[], round: number, lineNum: numb
   return matching;
 }
 
-export function computeLayout(graph: { nodes: Node[]; edges: Edge[]; lanes: string[] }) {
+export function computeLayout(
+  graph: { nodes: Node[]; edges: Edge[]; lanes: string[] },
+  collapsedRounds: Set<number> = new Set(),
+) {
   const laneHeightMap: Record<string, number> = {};
   const laneTopMap: Record<string, number> = {};
   const pos: Record<string, { x: number; y: number; col: number }> = {};
 
   const maxCol = Math.max(1, ...graph.nodes.map((n) => n.column ?? 1));
+
+  // Determine rounds and assign X positions to each column
+  const allRounds = Array.from(new Set(graph.nodes.map((n) => n.round ?? 1))).sort((a, b) => a - b);
+  const roundInfoList: Array<{
+    round: number;
+    startX: number;
+    width: number;
+    collapsed: boolean;
+    summary: RoundSummary;
+  }> = [];
+
+  const colXMap = new Map<number, number>();
+  const gutterBaseXMap = new Map<number, number>();
+
+  let currentX = LEFT_OFFSET;
+
+  for (const r of allRounds) {
+    const rNodes = graph.nodes.filter((n) => (n.round ?? 1) === r);
+    const rCols = Array.from(new Set(rNodes.map((n) => n.column ?? 1))).sort((a, b) => a - b);
+    const summary = getRoundSummary(graph, r);
+    const isCollapsed = collapsedRounds.has(r);
+
+    if (isCollapsed) {
+      const startX = currentX;
+      const width = COLLAPSED_COLUMN_WIDTH;
+      for (const col of rCols) {
+        colXMap.set(col, startX);
+        gutterBaseXMap.set(col, startX - GUTTER_WIDTH / 2);
+      }
+      gutterBaseXMap.set((rCols.at(-1) ?? 1) + 1, startX + width + GUTTER_WIDTH / 2);
+      roundInfoList.push({
+        round: r,
+        startX,
+        width,
+        collapsed: true,
+        summary,
+      });
+      currentX += width + GUTTER_WIDTH;
+    } else {
+      const startX = currentX - 20;
+      for (const col of rCols) {
+        colXMap.set(col, currentX);
+        gutterBaseXMap.set(col, currentX - GUTTER_WIDTH / 2);
+        currentX += COLUMN_WIDTH;
+      }
+      gutterBaseXMap.set((rCols.at(-1) ?? 1) + 1, currentX - GUTTER_WIDTH / 2);
+      const width = Math.max(COLUMN_WIDTH, rCols.length * COLUMN_WIDTH);
+      roundInfoList.push({
+        round: r,
+        startX,
+        width,
+        collapsed: false,
+        summary,
+      });
+    }
+  }
 
   // Calculate max stacked items in any column for each lane
   for (const lane of graph.lanes) {
@@ -132,7 +197,7 @@ export function computeLayout(graph: { nodes: Node[]; edges: Edge[]; lanes: stri
     currentTop += laneHeightMap[lane] + 32;
   }
 
-  const totalHeight = currentTop + 40;
+  const totalHeight = currentTop + 60;
 
   // Position each node: within lane and column, ordered by time / event order
   for (const lane of graph.lanes) {
@@ -147,14 +212,14 @@ export function computeLayout(graph: { nodes: Node[]; edges: Edge[]; lanes: stri
     for (const [col, colNodes] of byCol.entries()) {
       colNodes.forEach((node, stackIdx) => {
         const laneTop = laneTopMap[lane] ?? 24;
-        const x = LEFT_OFFSET + (col - 1) * COLUMN_WIDTH;
+        const x = colXMap.get(col) ?? (LEFT_OFFSET + (col - 1) * COLUMN_WIDTH);
         const y = laneTop + 44 + stackIdx * (NODE_HEIGHT + CARD_GAP_Y);
         pos[node.id] = { x, y, col };
       });
     }
   }
 
-  const totalWidth = Math.max(1100, LEFT_OFFSET + maxCol * COLUMN_WIDTH + 100);
+  const totalWidth = Math.max(1100, currentX + 220);
 
   // --- H2 Orthogonal Edge Routing with Inter-Lane Channels & Vertical Gutter Tracks ---
   // 1. Determine incoming and outgoing edges per node
@@ -170,10 +235,6 @@ export function computeLayout(graph: { nodes: Node[]; edges: Edge[]; lanes: stri
   }
 
   // 2. Identify channels and gutters used by edges
-  // Channel indices:
-  // channel -1: above lane 0 (at laneTopMap[0] - 16)
-  // channel i (0 <= i < lanes.length - 1): between lane i and lane i+1 (at laneTopMap[i+1] - 16)
-  // channel lanes.length - 1: below last lane
   const channelEdges = new Map<number, Edge[]>();
   const gutterEdges = new Map<number, Edge[]>();
 
@@ -189,6 +250,7 @@ export function computeLayout(graph: { nodes: Node[]; edges: Edge[]; lanes: stri
   };
 
   const getGutterBaseX = (col: number): number => {
+    if (gutterBaseXMap.has(col)) return gutterBaseXMap.get(col)!;
     return LEFT_OFFSET + (col - 1) * COLUMN_WIDTH - GUTTER_WIDTH / 2;
   };
 
@@ -359,6 +421,7 @@ export function computeLayout(graph: { nodes: Node[]; edges: Edge[]; lanes: stri
     edgePaths,
     edgeSegments,
     maxCol,
+    roundInfoList,
   };
 }
 
@@ -371,12 +434,15 @@ export function App() {
   const [wsStatus, setWsStatus] = useState<'idle' | 'connecting' | 'connected' | 'error'>('idle');
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
-  // Feature Toggles (H4: 0.5x / 1x / 2x speed toggle, default 0.5x on live runs)
+  // Feature Toggles (G2: 0.25x / 0.5x / 1x / 2x speed toggle, default 0.5x on live runs)
   const [userShowEveryStep, setUserShowEveryStep] = useState<boolean>(false);
-  const [replaySpeed, setReplaySpeed] = useState<0.5 | 1 | 2>(1);
+  const [replaySpeed, setReplaySpeed] = useState<0.25 | 0.5 | 1 | 2>(1);
   const [isFit, setIsFit] = useState<boolean>(false);
   const [autoFollow, setAutoFollow] = useState<boolean>(true);
   const [showLegend, setShowLegend] = useState<boolean>(false);
+
+  // Round collapsing state (G1a)
+  const [collapsedRounds, setCollapsedRounds] = useState<Set<number>>(new Set());
 
   // Side Panes and Focus Mode (H5: draggable pane width)
   const [leftPaneWidth, setLeftPaneWidth] = useState<number>(320);
@@ -412,6 +478,23 @@ export function App() {
     return view(rawEvents, { showEveryStep: effectiveShowEveryStep });
   }, [rawEvents, effectiveShowEveryStep]);
 
+  // Initialize collapsed rounds whenever graph changes (G1a)
+  useEffect(() => {
+    setCollapsedRounds(getInitialCollapsedRounds(graph));
+  }, [graph]);
+
+  const toggleRound = useCallback((roundNum: number) => {
+    setCollapsedRounds((prev) => {
+      const next = new Set(prev);
+      if (next.has(roundNum)) {
+        next.delete(roundNum);
+      } else {
+        next.add(roundNum);
+      }
+      return next;
+    });
+  }, []);
+
   const runStory = useMemo(() => {
     return story(graph, promptText);
   }, [graph, promptText]);
@@ -429,7 +512,7 @@ export function App() {
     }
   }, [recordedKey, source, graph.steps, playing, isStreaming]);
 
-  // Live run WebSocket starter (H4: default to 0.5x speed on live runs)
+  // Live run WebSocket starter (G2: default to 0.5x speed on live runs)
   const startLiveRun = useCallback((taskKey: 'A' | 'B') => {
     setSource('live');
     setLiveTask(taskKey);
@@ -508,28 +591,10 @@ export function App() {
     return new Set(visibleNodes.map((n) => n.id));
   }, [visibleNodes]);
 
-  // Layout computation & Orthogonal routing
+  // Layout computation & Orthogonal routing with collapsed rounds support (G1a)
   const layout = useMemo(() => {
-    return computeLayout(graph);
-  }, [graph]);
-
-  // Round Headers & Vertical Dividers (H1: Rounds stay as column groups with headers)
-  const roundInfo = useMemo(() => {
-    const rounds: Array<{ round: number; startX: number }> = [];
-    const allRounds = Array.from(new Set(graph.nodes.map((n) => n.round ?? 1))).sort((a, b) => a - b);
-    for (const r of allRounds) {
-      const rNodes = graph.nodes.filter((n) => (n.round ?? 1) === r);
-      if (rNodes.length === 0) continue;
-      const minCol = Math.min(...rNodes.map((n) => n.column ?? 1));
-      const startX = LEFT_OFFSET + (minCol - 1) * COLUMN_WIDTH - 20;
-
-      rounds.push({
-        round: r,
-        startX,
-      });
-    }
-    return rounds;
-  }, [graph.nodes]);
+    return computeLayout(graph, collapsedRounds);
+  }, [graph, collapsedRounds]);
 
   // Replay timer
   useEffect(() => {
@@ -561,7 +626,50 @@ export function App() {
     return () => clearTimeout(timer);
   }, [justRevealedId]);
 
-  // Keyboard navigation
+  // Fit Scale (H3: in Fit mode graph keeps its fitted height and scrolls horizontally)
+  const fitScale = useMemo(() => {
+    if (!isFit || !canvasScrollRef.current) return 1;
+    const container = canvasScrollRef.current;
+    const availableHeight = container.clientHeight - 32;
+    const scaleY = availableHeight / layout.totalHeight;
+    return Math.min(1, Math.max(0.3, scaleY));
+  }, [isFit, layout.totalHeight]);
+
+  // Step navigation helper (G3: Arrow keys & replay buttons follow and center node, highlight line)
+  const stepTo = useCallback(
+    (newStep: number) => {
+      setPlaying(false);
+      const clamped = Math.max(1, Math.min(maxStep, newStep));
+      setStep(clamped);
+
+      // Find the active revealed node at this step (or last remaining)
+      const stepNodes = graph.nodes.filter((n) => n.step === clamped);
+      const targetNode = stepNodes.at(-1) ?? graph.nodes.filter((n) => n.step <= clamped).at(-1);
+      if (targetNode) {
+        setJustRevealedId(targetNode.id);
+        const scrollContainer = canvasScrollRef.current;
+        const nodePos = layout.pos[targetNode.id];
+        if (scrollContainer && nodePos) {
+          const scale = isFit ? fitScale : 1;
+          const targetLeft = Math.max(0, (nodePos.x + NODE_WIDTH / 2) * scale - scrollContainer.clientWidth / 2);
+          const targetTop = isFit ? 0 : Math.max(0, (nodePos.y + NODE_HEIGHT / 2) * scale - scrollContainer.clientHeight / 2);
+          if (typeof scrollContainer.scrollTo === 'function') {
+            scrollContainer.scrollTo({
+              left: targetLeft,
+              top: targetTop,
+              behavior: 'smooth',
+            });
+          } else {
+            scrollContainer.scrollLeft = targetLeft;
+            scrollContainer.scrollTop = targetTop;
+          }
+        }
+      }
+    },
+    [maxStep, graph.nodes, layout.pos, isFit, fitScale],
+  );
+
+  // Keyboard navigation (G3: ← / → centres revealed node and highlights script line)
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement;
@@ -570,11 +678,9 @@ export function App() {
       if (e.key === 'ArrowRight' || e.key === 'ArrowLeft' || e.key === 'ArrowUp' || e.key === 'ArrowDown') {
         setAutoFollow(false);
         if (e.key === 'ArrowRight') {
-          setPlaying(false);
-          setStep((s) => Math.min(maxStep, s + 1));
+          stepTo(step + 1);
         } else if (e.key === 'ArrowLeft') {
-          setPlaying(false);
-          setStep((s) => Math.max(1, s - 1));
+          stepTo(step - 1);
         }
       } else if (e.key === 'Escape') {
         setSelectedId(null);
@@ -586,7 +692,7 @@ export function App() {
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [maxStep]);
+  }, [step, stepTo]);
 
   // Deselect if current node is hidden by step
   useEffect(() => {
@@ -594,15 +700,6 @@ export function App() {
       setSelectedId(null);
     }
   }, [step, selectedId, visibleNodeIds]);
-
-  // Fit Scale (H3: in Fit mode graph keeps its fitted height and scrolls horizontally)
-  const fitScale = useMemo(() => {
-    if (!isFit || !canvasScrollRef.current) return 1;
-    const container = canvasScrollRef.current;
-    const availableHeight = container.clientHeight - 32;
-    const scaleY = availableHeight / layout.totalHeight;
-    return Math.min(1, Math.max(0.3, scaleY));
-  }, [isFit, layout.totalHeight]);
 
   // Auto-scroll centering newest node when replaying or streaming (H3: follow keeps newest column in view in Fit mode too)
   useEffect(() => {
@@ -670,6 +767,14 @@ export function App() {
         if (node.step > step) {
           setStep(node.step);
         }
+        // Expand the round if it was collapsed
+        if (node.round && collapsedRounds.has(node.round)) {
+          setCollapsedRounds((prev) => {
+            const next = new Set(prev);
+            next.delete(node.round!);
+            return next;
+          });
+        }
         const scrollContainer = canvasScrollRef.current;
         const nodePos = layout.pos[id];
         if (scrollContainer && nodePos) {
@@ -689,19 +794,17 @@ export function App() {
         }
       }
     },
-    [graph.nodes, step, layout.pos, isFit, fitScale],
+    [graph.nodes, step, layout.pos, isFit, fitScale, collapsedRounds],
   );
 
-  // H6: Active revealed node during replay & streaming
+  // G3: Active revealed node during replay & streaming & manual stepping
   const activeRevealedNode = useMemo(() => {
     if (justRevealedId) {
       return graph.nodes.find((n) => n.id === justRevealedId);
     }
-    if (playing || isStreaming) {
-      return visibleNodes.find((n) => n.step === step);
-    }
-    return null;
-  }, [justRevealedId, playing, isStreaming, graph.nodes, visibleNodes, step]);
+    const nodesAtStep = visibleNodes.filter((n) => n.step === step);
+    return nodesAtStep.at(-1) ?? visibleNodes.at(-1) ?? null;
+  }, [justRevealedId, graph.nodes, visibleNodes, step]);
 
   // H6: Auto-scroll revealed line in script pane during replay/live runs
   useEffect(() => {
@@ -744,6 +847,8 @@ export function App() {
     window.addEventListener('pointerup', onPointerUp);
   };
 
+  const SPEED_OPTIONS: Array<0.25 | 0.5 | 1 | 2> = [0.25, 0.5, 1, 2];
+
   return (
     <div className="app">
       {/* Top Header */}
@@ -757,6 +862,7 @@ export function App() {
           <strong title={promptText}>{promptText}</strong>
         </div>
 
+        {/* G6: Run Picker with Honest Labels */}
         <div className="seg">
           <button
             className={source === 'recorded' && recordedKey === 'fake' ? 'active' : ''}
@@ -766,7 +872,7 @@ export function App() {
               setSelectedId(null);
             }}
           >
-            Demo Run
+            Simulated: injection succeeds
           </button>
           <button
             className={source === 'recorded' && recordedKey === 'runA' ? 'active' : ''}
@@ -776,7 +882,7 @@ export function App() {
               setSelectedId(null);
             }}
           >
-            Run A (4 Rounds)
+            Recorded live: A (triage + HR)
           </button>
           <button
             className={source === 'recorded' && recordedKey === 'runB' ? 'active' : ''}
@@ -786,7 +892,7 @@ export function App() {
               setSelectedId(null);
             }}
           >
-            Run B (Blocked)
+            Recorded live: B (honest mistake)
           </button>
         </div>
 
@@ -836,6 +942,14 @@ export function App() {
           </button>
         </div>
       </header>
+
+      {/* G6: Honest Banner for Simulated Run */}
+      {source === 'recorded' && recordedKey === 'fake' && (
+        <div className="simulated-banner">
+          <span className="simulated-banner-icon">⚠️</span>
+          <span>Simulated run: shows what happens if the hidden instruction in issue #42 works. Recorded live runs: A and B.</span>
+        </div>
+      )}
 
       {/* Toolbar */}
       <div className="toolbar">
@@ -1071,14 +1185,23 @@ export function App() {
                   transformOrigin: 'top left',
                 }}
               >
-                {/* Round Headers & Vertical Dividers (H1: Round N headers) */}
-                {roundInfo.map((r) => (
+                {/* Round Headers & Vertical Dividers (G1a: Clickable round headers that collapse/expand) */}
+                {layout.roundInfoList.map((r) => (
                   <div
                     key={`round-${r.round}`}
-                    className="round-divider"
+                    className={`round-divider ${r.collapsed ? 'collapsed' : 'expanded'}`}
                     style={{ left: r.startX }}
                   >
-                    <span className="round-tag">Round {r.round}</span>
+                    <button
+                      className="round-tag-btn"
+                      onClick={() => toggleRound(r.round)}
+                      title={r.collapsed ? 'Click to expand round' : 'Click to collapse round'}
+                      aria-label={r.collapsed ? `Expand Round ${r.round}` : `Collapse Round ${r.round}`}
+                    >
+                      <span className="round-tag">
+                        {r.collapsed ? r.summary.label : `Round ${r.round}`} {r.collapsed ? '▸' : '▾'}
+                      </span>
+                    </button>
                   </div>
                 ))}
 
@@ -1220,60 +1343,86 @@ export function App() {
                     })}
                 </svg>
 
-                {/* Visible Node Cards */}
+                {/* Visible Node Cards & Collapsed Round Summaries */}
                 <div className="node-layer">
-                  {visibleNodes.map((n) => {
-                    const pos = layout.pos[n.id];
-                    if (!pos) return null;
-
-                    const isSelected = selectedId === n.id;
-                    const isDim = detail !== null && !detail.lit.has(n.id);
-                    const isJustRevealed = justRevealedId === n.id;
-
-                    return (
+                  {/* G1a: Collapsed Round Summary Columns */}
+                  {layout.roundInfoList
+                    .filter((r) => r.collapsed)
+                    .map((r) => (
                       <button
-                        key={n.id}
-                        style={{ left: pos.x, top: pos.y, width: NODE_WIDTH, minHeight: NODE_HEIGHT }}
-                        className={`node-card kind-${n.kind} chip-${n.chip.toLowerCase()} ${
-                          isSelected ? 'selected' : ''
-                        } ${isDim ? 'dim' : ''} ${isJustRevealed ? 'just-revealed' : ''}`}
-                        onClick={() => selectNode(n.id)}
-                        onMouseEnter={() => setHoveredNodeId(n.id)}
-                        onMouseLeave={() => setHoveredNodeId(null)}
-                        title={`Step ${n.step}: ${n.title}`}
+                        key={`collapsed-round-col-${r.round}`}
+                        className="collapsed-round-col"
+                        style={{
+                          left: r.startX,
+                          top: 24,
+                          width: r.width - 20,
+                          height: layout.totalHeight - 64,
+                        }}
+                        onClick={() => toggleRound(r.round)}
+                        title={`${r.summary.label} (Click to expand)`}
+                        aria-label={`Round ${r.round} collapsed. Click to expand.`}
                       >
-                        <div className="node-card-top">
-                          <span className={`status-chip chip-${n.chip.toLowerCase()}`}>
-                            {n.chip}
-                          </span>
-                          {n.repeatCount && n.repeatCount > 1 && (
-                            <span className="repeat-badge">×{n.repeatCount}</span>
-                          )}
-                        </div>
-                        <strong className="node-title">{n.title}</strong>
-
-                        {/* Tool call monospace signature */}
-                        {n.callSignature && (
-                          <code className="node-call-sig">{n.callSignature}</code>
-                        )}
-
-                        {/* Blocked reason line */}
-                        {n.blockedReason && (
-                          <span className="node-blocked-reason">{n.blockedReason}</span>
-                        )}
-
-                        {/* Untrusted reason on UNTRUSTED nodes */}
-                        {n.chip === 'UNTRUSTED' && n.untrustedReason && (
-                          <span className="node-untrusted-reason">{n.untrustedReason}</span>
-                        )}
-
-                        {/* Subtitle if neither call signature nor untrusted reason replaces it */}
-                        {!n.callSignature && (!n.untrustedReason || n.chip !== 'UNTRUSTED') && (
-                          <span className="node-sub">{n.subtitle}</span>
-                        )}
+                        <div className="collapsed-round-badge">Round {r.round}</div>
+                        <div className="collapsed-round-summary-text">{r.summary.label}</div>
+                        <span className="collapsed-round-click-hint">Click to expand</span>
                       </button>
-                    );
-                  })}
+                    ))}
+
+                  {/* Uncollapsed Nodes */}
+                  {visibleNodes
+                    .filter((n) => !collapsedRounds.has(n.round ?? 1))
+                    .map((n) => {
+                      const pos = layout.pos[n.id];
+                      if (!pos) return null;
+
+                      const isSelected = selectedId === n.id;
+                      const isDim = detail !== null && !detail.lit.has(n.id);
+                      const isJustRevealed = justRevealedId === n.id;
+
+                      return (
+                        <button
+                          key={n.id}
+                          style={{ left: pos.x, top: pos.y, width: NODE_WIDTH, minHeight: NODE_HEIGHT }}
+                          className={`node-card kind-${n.kind} chip-${n.chip.toLowerCase()} ${
+                            isSelected ? 'selected' : ''
+                          } ${isDim ? 'dim' : ''} ${isJustRevealed ? 'just-revealed' : ''}`}
+                          onClick={() => selectNode(n.id)}
+                          onMouseEnter={() => setHoveredNodeId(n.id)}
+                          onMouseLeave={() => setHoveredNodeId(null)}
+                          title={`Step ${n.step}: ${n.title}`}
+                        >
+                          <div className="node-card-top">
+                            <span className={`status-chip chip-${n.chip.toLowerCase()}`}>
+                              {n.chip}
+                            </span>
+                            {n.repeatCount && n.repeatCount > 1 && (
+                              <span className="repeat-badge">×{n.repeatCount}</span>
+                            )}
+                          </div>
+                          <strong className="node-title">{n.title}</strong>
+
+                          {/* Tool call monospace signature */}
+                          {n.callSignature && (
+                            <code className="node-call-sig">{n.callSignature}</code>
+                          )}
+
+                          {/* Blocked reason line */}
+                          {n.blockedReason && (
+                            <span className="node-blocked-reason">{n.blockedReason}</span>
+                          )}
+
+                          {/* G4: Untrusted reason on UNTRUSTED nodes - wraps in full without truncation */}
+                          {n.chip === 'UNTRUSTED' && n.untrustedReason && (
+                            <span className="node-untrusted-reason">{n.untrustedReason}</span>
+                          )}
+
+                          {/* Subtitle if neither call signature nor untrusted reason replaces it */}
+                          {!n.callSignature && (!n.untrustedReason || n.chip !== 'UNTRUSTED') && (
+                            <span className="node-sub">{n.subtitle}</span>
+                          )}
+                        </button>
+                      );
+                    })}
 
                   {/* Pulsing Placeholder while waiting for Gemini */}
                   {isWaitingForGemini && (
@@ -1321,15 +1470,23 @@ export function App() {
             </div>
           )}
 
-          {/* Replay Bar (H4: 0.5x / 1x / 2x speed button) */}
+          {/* G1b: Minimap in reserved bottom-right corner */}
+          {display === 'graph' && (
+            <Minimap
+              nodes={graph.nodes}
+              visibleNodes={visibleNodes}
+              layout={layout}
+              scrollContainerRef={canvasScrollRef}
+              isFit={isFit}
+            />
+          )}
+
+          {/* Replay Bar (G2: 0.25x / 0.5x / 1x / 2x speed button; G3: arrow buttons follow) */}
           <div className="replay">
             <button
               className="replay-btn"
               aria-label="Previous step"
-              onClick={() => {
-                setPlaying(false);
-                setStep((s) => Math.max(1, s - 1));
-              }}
+              onClick={() => stepTo(step - 1)}
             >
               ←
             </button>
@@ -1346,18 +1503,19 @@ export function App() {
             <button
               className="replay-btn"
               aria-label="Next step"
-              onClick={() => {
-                setPlaying(false);
-                setStep((s) => Math.min(maxStep, s + 1));
-              }}
+              onClick={() => stepTo(step + 1)}
             >
               →
             </button>
 
-            {/* Replay Speed Toggle (H4: 0.5x / 1x / 2x) */}
+            {/* Replay Speed Toggle (G2: 0.25x / 0.5x / 1x / 2x) */}
             <button
               className="speed-btn"
-              onClick={() => setReplaySpeed((s) => (s === 0.5 ? 1 : s === 1 ? 2 : 0.5))}
+              onClick={() => {
+                const curIdx = SPEED_OPTIONS.indexOf(replaySpeed);
+                const nextSpeed = SPEED_OPTIONS[(curIdx + 1) % SPEED_OPTIONS.length];
+                setReplaySpeed(nextSpeed);
+              }}
               title="Toggle playback speed"
             >
               {replaySpeed}x
@@ -1370,10 +1528,7 @@ export function App() {
                   aria-label={`Go to step ${s}`}
                   title={`Step ${s}`}
                   className={`tick ${s <= step ? 'passed' : ''} ${s === step ? 'current' : ''}`}
-                  onClick={() => {
-                    setPlaying(false);
-                    setStep(s);
-                  }}
+                  onClick={() => stepTo(s)}
                 />
               ))}
             </div>
@@ -1404,6 +1559,7 @@ export function App() {
             node={detail.node}
             inspection={detail}
             graph={graph}
+            step={step}
             runEvents={rawEvents}
             onPick={selectNode}
             onClose={() => setSelectedId(null)}
@@ -1433,6 +1589,137 @@ export function App() {
           MCPVision · Value lineage for Code Mode · Click node to trace · ← → to step
         </span>
       </footer>
+    </div>
+  );
+}
+
+// G1b: Minimap in canvas bottom-right corner (180x60, semi-transparent, click/drag to scroll)
+function Minimap({
+  visibleNodes,
+  layout,
+  scrollContainerRef,
+}: {
+  nodes: Node[];
+  visibleNodes: Node[];
+  layout: ReturnType<typeof computeLayout>;
+  scrollContainerRef: React.RefObject<HTMLDivElement | null>;
+  isFit: boolean;
+}) {
+  const [viewport, setViewport] = useState({ left: 0, top: 0, width: 30, height: 20 });
+  const minimapWidth = 180;
+  const minimapHeight = 60;
+
+  const updateViewport = useCallback(() => {
+    const el = scrollContainerRef.current;
+    if (!el || layout.totalWidth <= 0 || layout.totalHeight <= 0) return;
+    const vLeft = (el.scrollLeft / layout.totalWidth) * minimapWidth;
+    const vTop = (el.scrollTop / layout.totalHeight) * minimapHeight;
+    const vWidth = Math.max(16, (el.clientWidth / layout.totalWidth) * minimapWidth);
+    const vHeight = Math.max(12, (el.clientHeight / layout.totalHeight) * minimapHeight);
+    setViewport({
+      left: Math.max(0, Math.min(minimapWidth - vWidth, vLeft)),
+      top: Math.max(0, Math.min(minimapHeight - vHeight, vTop)),
+      width: Math.min(minimapWidth, vWidth),
+      height: Math.min(minimapHeight, vHeight),
+    });
+  }, [layout.totalWidth, layout.totalHeight, scrollContainerRef]);
+
+  useEffect(() => {
+    updateViewport();
+    const el = scrollContainerRef.current;
+    if (!el) return;
+    el.addEventListener('scroll', updateViewport);
+    window.addEventListener('resize', updateViewport);
+    return () => {
+      el.removeEventListener('scroll', updateViewport);
+      window.removeEventListener('resize', updateViewport);
+    };
+  }, [updateViewport, scrollContainerRef]);
+
+  const scrollToMinimapPos = (clientX: number, clientY: number, target: HTMLDivElement) => {
+    const rect = target.getBoundingClientRect();
+    const clickX = Math.max(0, Math.min(rect.width, clientX - rect.left));
+    const clickY = Math.max(0, Math.min(rect.height, clientY - rect.top));
+    const ratioX = clickX / rect.width;
+    const ratioY = clickY / rect.height;
+
+    const el = scrollContainerRef.current;
+    if (!el) return;
+    const targetLeft = ratioX * layout.totalWidth - el.clientWidth / 2;
+    const targetTop = ratioY * layout.totalHeight - el.clientHeight / 2;
+    if (typeof el.scrollTo === 'function') {
+      el.scrollTo({ left: Math.max(0, targetLeft), top: Math.max(0, targetTop), behavior: 'auto' });
+    } else {
+      el.scrollLeft = Math.max(0, targetLeft);
+      el.scrollTop = Math.max(0, targetTop);
+    }
+  };
+
+  const handlePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    const target = e.currentTarget;
+    scrollToMinimapPos(e.clientX, e.clientY, target);
+
+    const onPointerMove = (ev: PointerEvent) => {
+      scrollToMinimapPos(ev.clientX, ev.clientY, target);
+    };
+    const onPointerUp = () => {
+      window.removeEventListener('pointermove', onPointerMove);
+      window.removeEventListener('pointerup', onPointerUp);
+    };
+    window.addEventListener('pointermove', onPointerMove);
+    window.addEventListener('pointerup', onPointerUp);
+  };
+
+  const scaleX = minimapWidth / Math.max(1, layout.totalWidth);
+  const scaleY = minimapHeight / Math.max(1, layout.totalHeight);
+
+  return (
+    <div
+      className="minimap"
+      onPointerDown={handlePointerDown}
+      title="Graph Minimap: click or drag to scroll"
+      aria-label="Graph minimap"
+    >
+      <svg width={minimapWidth} height={minimapHeight} className="minimap-svg">
+        {/* Render small node dots */}
+        {visibleNodes.map((n) => {
+          const p = layout.pos[n.id];
+          if (!p) return null;
+          const x = p.x * scaleX;
+          const y = p.y * scaleY;
+          const w = Math.max(4, NODE_WIDTH * scaleX);
+          const h = Math.max(3, NODE_HEIGHT * scaleY);
+          let fill = '#8fa3bf';
+          if (n.chip === 'PRIVATE') fill = '#ffb454';
+          else if (n.chip === 'UNTRUSTED') fill = '#ff7ab6';
+          else if (n.chip === 'BLOCKED') fill = '#ff5c5c';
+          else if (n.chip === 'SENT') fill = '#6ca8ff';
+
+          return (
+            <rect
+              key={n.id}
+              x={x}
+              y={y}
+              width={w}
+              height={h}
+              rx={1}
+              fill={fill}
+              opacity={0.8}
+            />
+          );
+        })}
+      </svg>
+      {/* Viewport rectangle */}
+      <div
+        className="minimap-viewport"
+        style={{
+          left: viewport.left,
+          top: viewport.top,
+          width: viewport.width,
+          height: viewport.height,
+        }}
+      />
     </div>
   );
 }
@@ -1523,12 +1810,201 @@ function StoryDrawer({
   );
 }
 
-// Detail Drawer when a node is selected
+// G5: Argument Card with full value, >8 lines toggle, and plain words comes-from chips
+function ArgumentCard({
+  argName,
+  argData,
+  sources,
+  rpcArg,
+  onPick,
+}: {
+  argName: string;
+  argData?: { preview: string; from?: string[] };
+  sources: Node[];
+  rpcArg?: any;
+  onPick: (id: string) => void;
+}) {
+  const [showAll, setShowAll] = useState(false);
+
+  // Determine full value text: prefer raw rpc parameter value if available
+  let val = rpcArg;
+  if (val === undefined && argData?.preview) {
+    val = argData.preview;
+    if (typeof val === 'string' && val.startsWith('"') && val.endsWith('"') && val.length > 1) {
+      try {
+        val = JSON.parse(val);
+      } catch {
+        val = val.slice(1, -1);
+      }
+    }
+  }
+
+  const isComplex = typeof val === 'object' && val !== null;
+  const formattedVal = isComplex ? JSON.stringify(val, null, 2) : String(val ?? '');
+  const lines = formattedVal.split('\n');
+  const isLong = lines.length > 8;
+  const displayedVal = isLong && !showAll ? lines.slice(0, 8).join('\n') : formattedVal;
+
+  return (
+    <div className="arg-card">
+      <div className="arg-label">{argName}</div>
+      <div className="arg-val-wrapper">
+        {isComplex || isLong ? (
+          <pre className="arg-code-block">
+            <code>{displayedVal}</code>
+          </pre>
+        ) : (
+          <div className="arg-string-val">{displayedVal}</div>
+        )}
+        {isLong && (
+          <button
+            className="btn-show-all-arg"
+            onClick={() => setShowAll(!showAll)}
+          >
+            {showAll ? 'Show fewer lines' : `Show all (${lines.length} lines)`}
+          </button>
+        )}
+      </div>
+
+      <div className="arg-comes-from-section">
+        <span className="arg-comes-from-label">comes from:</span>
+        {sources.length === 0 ? (
+          <span className="source-none">literal in script</span>
+        ) : (
+          <div className="arg-sources-chips">
+            {sources.map((src) => {
+              const chipLabel = src.line
+                ? `${src.title.replace(/ · line \d+$/, '')} · line ${src.line} · ${src.chip}`
+                : `${src.title} · ${src.chip}`;
+              return (
+                <button
+                  key={src.id}
+                  className={`source-chip chip-${src.chip.toLowerCase()}`}
+                  onClick={() => onPick(src.id)}
+                  title={`Inspect ${chipLabel}`}
+                >
+                  {chipLabel}
+                </button>
+              );
+            })}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// G5: Lineage Vertical Chain View
+function LineageChainView({
+  graph,
+  node,
+  step,
+  onPick,
+}: {
+  graph: ReturnType<typeof view>;
+  node: Node;
+  step: number;
+  onPick: (id: string) => void;
+}) {
+  const chains = useMemo(() => {
+    return buildLineageChains(graph, node.id, step);
+  }, [graph, node.id, step]);
+
+  if (chains.length === 0) {
+    return <p className="dim-text">No upstream lineage for this node.</p>;
+  }
+
+  return (
+    <div className="lineage-chains-list">
+      {chains.map((chain, cIdx) => (
+        <div key={cIdx} className="lineage-vertical-chain">
+          {chain.map((stepItem, sIdx) => {
+            const isTarget = stepItem.isTarget;
+            const isLiteral = stepItem.id === 'literal';
+            return (
+              <React.Fragment key={`${stepItem.id}-${sIdx}`}>
+                <div
+                  className={`lineage-chain-step ${isTarget ? 'is-target' : ''} ${
+                    isLiteral ? 'is-literal' : 'is-clickable'
+                  } ${stepItem.chip ? `chip-${stepItem.chip.toLowerCase()}` : ''}`}
+                  onClick={() => {
+                    if (!isTarget && !isLiteral && stepItem.id) {
+                      onPick(stepItem.id);
+                    }
+                  }}
+                  title={isLiteral ? undefined : `Inspect ${stepItem.label}`}
+                >
+                  <span className="step-label-text">{stepItem.label}</span>
+                  {stepItem.chip && !isTarget && !isLiteral && (
+                    <span className={`status-chip mini chip-${stepItem.chip.toLowerCase()}`}>
+                      {stepItem.chip}
+                    </span>
+                  )}
+                </div>
+                {sIdx < chain.length - 1 && <div className="lineage-down-arrow">↓</div>}
+              </React.Fragment>
+            );
+          })}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// G5: Policy Section with One Coloured Line & Full Reason
+function PolicySection({ node }: { node: Node }) {
+  if (node.kind === 'blocked') {
+    const reasonText =
+      node.event.reason ||
+      node.blockedReason ||
+      'Private payroll data would have reached the public tracker.';
+    return (
+      <div className="policy-decision-box blocked">
+        <div className="policy-line-header blocked">
+          <span className="policy-dot">●</span> Blocked: private → public
+        </div>
+        <p className="policy-reason-full">{reasonText}</p>
+      </div>
+    );
+  }
+
+  if (node.kind === 'call') {
+    return (
+      <div className="policy-decision-box allowed">
+        <div className="policy-line-header allowed">
+          <span className="policy-dot">●</span> Allowed
+        </div>
+        <p className="policy-reason-full">
+          {node.event.reason || 'All arguments cleared safety policy. Sent to external MCP server.'}
+        </p>
+      </div>
+    );
+  }
+
+  // Value node or prompt
+  const sensClass = node.chip === 'PRIVATE' ? 'private' : node.chip === 'UNTRUSTED' ? 'untrusted' : 'allowed';
+  const label = node.chip === 'PRIVATE' ? 'Private' : node.chip === 'UNTRUSTED' ? 'Untrusted' : 'Allowed';
+  return (
+    <div className={`policy-decision-box ${sensClass}`}>
+      <div className={`policy-line-header ${sensClass}`}>
+        <span className="policy-dot">●</span> {label}
+      </div>
+      <p className="policy-reason-full">
+        {node.untrustedReason ||
+          (node.chip === 'PRIVATE'
+            ? 'Private data kept securely inside the execution sandbox.'
+            : 'Public data cleared for model context.')}
+      </p>
+    </div>
+  );
+}
+
+// Detail Drawer when a node is selected (G5 Rework)
 function DetailDrawer({
   node,
   inspection,
   graph,
-  runEvents,
+  step,
   onPick,
   onClose,
   onCollapse,
@@ -1536,6 +2012,7 @@ function DetailDrawer({
   node: Node;
   inspection: ReturnType<typeof inspect>;
   graph: ReturnType<typeof view>;
+  step: number;
   runEvents: RunEvent[];
   onPick: (id: string) => void;
   onClose: () => void;
@@ -1543,6 +2020,7 @@ function DetailDrawer({
 }) {
   const e = node.event;
   const chipClass = `chip-${node.chip.toLowerCase()}`;
+  const rpcArgs = e.rpc?.params?.arguments ?? {};
 
   return (
     <aside className="drawer">
@@ -1597,7 +2075,7 @@ function DetailDrawer({
         </section>
       )}
 
-      {/* Plain English Summary */}
+      {/* Plain English Summary (Top) */}
       <section className="drawer-section">
         <h3>SUMMARY</h3>
         {inspection.plainSummary.map((line, idx) => (
@@ -1615,64 +2093,62 @@ function DetailDrawer({
         </section>
       )}
 
-      {/* Arguments & Traced Values for Call/Blocked */}
+      {/* G5: ARGUMENTS Section */}
       {(node.kind === 'call' || node.kind === 'blocked') && (
         <section className="drawer-section">
-          <h3>ARGUMENTS & LINEAGE</h3>
+          <h3>ARGUMENTS</h3>
           {inspection.arguments.length === 0 ? (
             <p className="dim-text">No arguments provided.</p>
           ) : (
-            <div className="args-list">
+            <div className="args-cards-list">
               {inspection.arguments.map((arg) => (
-                <div key={arg.name} className="arg-box">
-                  <div className="arg-header">
-                    <span className="arg-name">{arg.name}</span>
-                    <span className="arg-preview">{arg.preview}</span>
-                  </div>
-                  <div className="arg-sources">
-                    <span className="sources-label">Sources:</span>
-                    {arg.sources.length === 0 ? (
-                      <span className="source-none">Literal in script (no tool source)</span>
-                    ) : (
-                      arg.sources.map((src) => (
-                        <button
-                          key={src.id}
-                          className={`source-chip chip-${src.chip.toLowerCase()}`}
-                          onClick={() => onPick(src.id)}
-                          title={`Inspect ${src.title}`}
-                        >
-                          {src.title}
-                        </button>
-                      ))
-                    )}
-                  </div>
-                </div>
+                <ArgumentCard
+                  key={arg.name}
+                  argName={arg.name}
+                  argData={e.args?.[arg.name]}
+                  sources={arg.sources}
+                  rpcArg={rpcArgs[arg.name]}
+                  onPick={onPick}
+                />
               ))}
-            </div>
-          )}
-
-          {/* Blocked explanation banner */}
-          {node.kind === 'blocked' && (
-            <div className="policy-decision-box blocked">
-              <strong>Policy decision: BLOCKED</strong>
-              <p>{node.blockedReason || 'Private data would have reached a public server.'}</p>
-              <span className="policy-verdict">Not sent to external MCP server</span>
-            </div>
-          )}
-          {node.kind === 'call' && (
-            <div className="policy-decision-box allowed">
-              <strong>Policy decision: ALLOWED</strong>
-              <p>All arguments cleared safety policy.</p>
-              <span className="policy-verdict">Successfully executed</span>
             </div>
           )}
         </section>
       )}
 
-      {/* Raw Event JSON */}
+      {/* G5: LINEAGE Section (Vertical chain from original source to this node) */}
       <section className="drawer-section">
-        <h3>RAW EVENT</h3>
-        <pre className="json-block">{JSON.stringify(e, null, 2)}</pre>
+        <h3>LINEAGE</h3>
+        <LineageChainView graph={graph} node={node} step={step} onPick={onPick} />
+      </section>
+
+      {/* G5: POLICY Section */}
+      {(node.kind === 'call' || node.kind === 'blocked' || node.kind === 'value') && (
+        <section className="drawer-section">
+          <h3>POLICY</h3>
+          <PolicySection node={node} />
+        </section>
+      )}
+
+      {/* G5: Timing, Transport & Raw JSON-RPC Collapsed at Bottom */}
+      <section className="drawer-section drawer-details-section">
+        <details className="drawer-details">
+          <summary className="drawer-details-summary">TIMING, TRANSPORT & RAW JSON-RPC</summary>
+          <div className="drawer-details-body">
+            <div className="details-row">
+              <span className="details-k">TIMING:</span>
+              <span className="details-v">{e.ms !== undefined ? `${e.ms} ms` : `${e.t} ms`}</span>
+            </div>
+            {e.transport && (
+              <div className="details-row">
+                <span className="details-k">TRANSPORT:</span>
+                <span className="details-v">{e.transport}</span>
+              </div>
+            )}
+            <div className="details-rpc-header">RAW JSON-RPC / EVENT:</div>
+            <pre className="json-block">{JSON.stringify(e.rpc || e, null, 2)}</pre>
+          </div>
+        </details>
       </section>
     </aside>
   );
@@ -1685,3 +2161,4 @@ if (typeof document !== 'undefined') {
     root.render(<App />);
   }
 }
+

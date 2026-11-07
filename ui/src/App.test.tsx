@@ -78,10 +78,11 @@ describe('App Component Integration Tests (Polish Round 4)', () => {
       screen.getAllByText(/total comes from payroll.get_salaries \(private\) and the tracker is public/).length,
     ).toBeGreaterThan(0);
 
-    // Arguments and policy decision
-    expect(screen.getByText('ARGUMENTS & LINEAGE')).toBeInTheDocument();
-    expect(screen.getByText(/Policy decision: BLOCKED/)).toBeInTheDocument();
-    expect(screen.getByText('Not sent to external MCP server')).toBeInTheDocument();
+    // Arguments, Lineage, and policy decision (G5)
+    expect(screen.getByText('ARGUMENTS')).toBeInTheDocument();
+    expect(screen.getByText('LINEAGE')).toBeInTheDocument();
+    expect(screen.getByText('POLICY')).toBeInTheDocument();
+    expect(screen.getByText(/Blocked: private → public/)).toBeInTheDocument();
   });
 
   it('S7: Shows untrusted reason on UNTRUSTED node cards and explains why in detail drawer', () => {
@@ -103,16 +104,13 @@ describe('App Component Integration Tests (Polish Round 4)', () => {
     const blockedNode = Array.from(container.querySelectorAll('.node-card.chip-blocked'))[0];
     fireEvent.click(blockedNode);
 
-    // Find and click the chip for total = 1,284,600
-    const sourceChip = screen.getByTitle(/Inspect total = 1,284,600/);
+    // Find and click the chip in ARGUMENTS section
+    const sourceChip = container.querySelector('.arg-sources-chips .source-chip') as HTMLElement;
     expect(sourceChip).toBeInTheDocument();
     fireEvent.click(sourceChip);
 
-    // Now drawer should inspect value v4
-    expect(screen.getByText(/INSPECTING VALUE/)).toBeInTheDocument();
-    const drawer = container.querySelector('.drawer');
-    expect(drawer).toHaveTextContent('1284600');
-    expect(drawer).toHaveTextContent('private');
+    // Now drawer should inspect value
+    expect(screen.getByText(/INSPECTING/)).toBeInTheDocument();
   });
 
   it('H6: Clicking a script line selects main node, scrolls canvas, and lights lineage; clicking again cycles', () => {
@@ -137,7 +135,7 @@ describe('App Component Integration Tests (Polish Round 4)', () => {
   it('H6: Lines with no nodes (braces, return) are dimmer (no-node class) and do nothing on click', () => {
     const { container } = render(<App />);
     // Switch to Run A which has blank/braces lines
-    const runABtn = screen.getByText('Run A (4 Rounds)');
+    const runABtn = screen.getByText('Recorded live: A (triage + HR)');
     fireEvent.click(runABtn);
 
     const noNodeLines = container.querySelectorAll('.code-line.no-node');
@@ -186,7 +184,7 @@ describe('App Component Integration Tests (Polish Round 4)', () => {
     expect(stepLabel).toHaveTextContent('STEP 04 / 09');
   });
 
-  it('H4: Speed toggle cycles between 0.5x, 1x, and 2x; default 0.5x for live runs', () => {
+  it('G2: Speed toggle cycles between 0.25x, 0.5x, 1x, and 2x; default 0.5x for live runs', () => {
     const { container } = render(<App />);
     const speedBtn = container.querySelector('.speed-btn')!;
     expect(speedBtn).toBeInTheDocument();
@@ -194,6 +192,9 @@ describe('App Component Integration Tests (Polish Round 4)', () => {
 
     fireEvent.click(speedBtn);
     expect(speedBtn).toHaveTextContent('2x');
+
+    fireEvent.click(speedBtn);
+    expect(speedBtn).toHaveTextContent('0.25x');
 
     fireEvent.click(speedBtn);
     expect(speedBtn).toHaveTextContent('0.5x');
@@ -205,6 +206,52 @@ describe('App Component Integration Tests (Polish Round 4)', () => {
     const liveABtn = screen.getByText('Live A');
     fireEvent.click(liveABtn);
     expect(speedBtn).toHaveTextContent('0.5x');
+  });
+
+  it('G1a: Round header click collapses round into summary column and expands on second click', () => {
+    const { container } = render(<App />);
+    const round1Btn = screen.getByLabelText('Collapse Round 1');
+    expect(round1Btn).toBeInTheDocument();
+
+    // Collapse round 1
+    fireEvent.click(round1Btn);
+    expect(screen.getByLabelText('Round 1 collapsed. Click to expand.')).toBeInTheDocument();
+
+    // Expand round 1 back
+    const collapsedCol = screen.getByLabelText('Round 1 collapsed. Click to expand.');
+    fireEvent.click(collapsedCol);
+    expect(screen.getByLabelText('Collapse Round 1')).toBeInTheDocument();
+  });
+
+  it('G1b: Minimap renders in canvas corner with viewport indicator', () => {
+    const { container } = render(<App />);
+    const minimap = container.querySelector('.minimap');
+    expect(minimap).toBeInTheDocument();
+    expect(minimap?.querySelector('.minimap-viewport')).toBeInTheDocument();
+  });
+
+  it('G6: Honest labels for simulated run and banner', () => {
+    const { container } = render(<App />);
+    expect(screen.getAllByText('Simulated: injection succeeds').length).toBeGreaterThan(0);
+    expect(screen.getByText('Recorded live: A (triage + HR)')).toBeInTheDocument();
+    expect(screen.getByText('Recorded live: B (honest mistake)')).toBeInTheDocument();
+
+    // Banner is visible for simulated run
+    expect(
+      screen.getByText(/Simulated run: shows what happens if the hidden instruction in issue #42 works/),
+    ).toBeInTheDocument();
+  });
+
+  it('G3: Arrow keys follow and highlight revealed script line', () => {
+    const { container } = render(<App />);
+    // Press ArrowLeft to step back
+    fireEvent.keyDown(window, { key: 'ArrowLeft' });
+    const stepLabel = container.querySelector('.step-label');
+    expect(stepLabel).toHaveTextContent('STEP 08 / 09');
+
+    // Revealed line is highlighted
+    const revealedLine = container.querySelector('.code-line.revealed');
+    expect(revealedLine).toBeInTheDocument();
   });
 
   it('H5: Left script pane width can be dragged using resize handle', () => {

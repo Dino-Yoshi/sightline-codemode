@@ -1,5 +1,13 @@
 import { describe, it, expect } from 'vitest';
-import { parseRun, view, inspect, story } from './view';
+import {
+  parseRun,
+  view,
+  inspect,
+  story,
+  getRoundSummary,
+  getInitialCollapsedRounds,
+  buildLineageChains,
+} from './view';
 import fakeRunText from '../../runs/fake-run.jsonl?raw';
 import runAText from '../../runs/run-a.jsonl?raw';
 import runBText from '../../runs/run-b.jsonl?raw';
@@ -11,7 +19,82 @@ const vRunA = view(runAEvents);
 const runBEvents = parseRun(runBText);
 const vRunB = view(runBEvents);
 
-describe('Seam B: run view and inspection (Polish Round 3)', () => {
+describe('Seam B: run view and inspection (Polish Round 5)', () => {
+  it('G1 Seam B: getRoundSummary formats round summaries accurately', () => {
+    // Fake run Round 1
+    const r1 = getRoundSummary(vFake, 1);
+    expect(r1.round).toBe(1);
+    expect(r1.untrustedCount).toBe(2);
+    expect(r1.hasSensitive).toBe(true);
+    expect(r1.label).toContain('Round 1');
+    expect(r1.label).toContain('2 untrusted');
+
+    // Fake run Round 2
+    const r2 = getRoundSummary(vFake, 2);
+    expect(r2.round).toBe(2);
+    expect(r2.callCount).toBe(3);
+    expect(r2.blockedCount).toBe(1);
+    expect(r2.privateCount).toBe(2);
+    expect(r2.hasSensitive).toBe(true);
+  });
+
+  it('G1 Seam B: getInitialCollapsedRounds keeps runs <= 3 rounds expanded, collapses non-sensitive rounds in runs > 3 rounds', () => {
+    // Fake run has 2 rounds: starts with 0 collapsed rounds
+    const fakeCollapsed = getInitialCollapsedRounds(vFake);
+    expect(fakeCollapsed.size).toBe(0);
+
+    // Run B has 2 rounds: starts with 0 collapsed rounds
+    const bCollapsed = getInitialCollapsedRounds(vRunB);
+    expect(bCollapsed.size).toBe(0);
+
+    // Synthetic 4-round run where Round 3 has only public operations
+    const fourRoundRun = [
+      { type: 'prompt', text: 'Task', step: 1 },
+      { type: 'model_turn', id: 'm1', round: 1, step: 2 },
+      { type: 'call', id: 'c1', server: 'payroll', tool: 'get_salaries', sensitivity: 'private', step: 3 },
+      { type: 'model_turn', id: 'm2', round: 2, step: 4 },
+      { type: 'call', id: 'c2', server: 'tracker', tool: 'list_issues', taint: 'untrusted', step: 5 },
+      { type: 'model_turn', id: 'm3', round: 3, step: 6 },
+      { type: 'call', id: 'c3', server: 'calculator', tool: 'add', sensitivity: 'public', step: 7 },
+      { type: 'model_turn', id: 'm4', round: 4, step: 8 },
+      { type: 'blocked', id: 'c4', server: 'public', tool: 'post', rule: 'private→public', step: 9 },
+    ];
+    const vFour = view(fourRoundRun as any);
+    const fourCollapsed = getInitialCollapsedRounds(vFour);
+
+    // Round 3 has no private, blocked, or untrusted nodes -> starts collapsed
+    expect(fourCollapsed.has(3)).toBe(true);
+    // Rounds 1, 2, 4 have sensitive nodes -> stay expanded
+    expect(fourCollapsed.has(1)).toBe(false);
+    expect(fourCollapsed.has(2)).toBe(false);
+    expect(fourCollapsed.has(4)).toBe(false);
+  });
+
+  it('G4: Untrusted reason is not truncated with ellipsis', () => {
+    const x1Node = vFake.nodes.find((n) => n.id === 'x1');
+    expect(x1Node).toBeDefined();
+    expect(x1Node?.chip).toBe('UNTRUSTED');
+    expect(x1Node?.untrustedReason).toBeDefined();
+    expect(x1Node?.untrustedReason).not.toContain('…');
+    expect(x1Node?.untrustedReason).toContain('Issue #42 hides an instruction');
+  });
+
+  it('G5: buildLineageChains produces top-to-bottom vertical chains from source to target call', () => {
+    // In fake run, blocked call c4 has arguments that trace back to payroll and tracker
+    const c4Chains = buildLineageChains(vFake, 'c4');
+    expect(c4Chains.length).toBeGreaterThan(0);
+
+    // One chain should start at payroll.get_salaries and lead to this call: body
+    const payrollChain = c4Chains.find((chain) =>
+      chain.some((step) => step.label.includes('payroll.get_salaries') || step.label.includes('Read payroll')),
+    );
+    expect(payrollChain).toBeDefined();
+
+    // The last step in chain is target call
+    const lastStep = payrollChain![payrollChain!.length - 1];
+    expect(lastStep.isTarget).toBe(true);
+    expect(lastStep.label).toContain('this call: body');
+  });
   it('parses JSONL run into events and creates structured view without YOU lane (S3)', () => {
     expect(vFake.nodes.length).toBeGreaterThan(0);
     expect(vFake.edges.length).toBeGreaterThan(0);
