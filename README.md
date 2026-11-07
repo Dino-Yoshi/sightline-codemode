@@ -1,143 +1,108 @@
 # MCPVision
 
-> strace for Code Mode: see where every value in your agent's script came from and where it went, and block private data before it leaks
+> **strace for Code Mode.** See where every value in your agent's script came from and where it went, and block private data before it leaks.
 
-## The Problem
+Built in one day at **Zero To Demo** (NemulAI × Hack District, 2026-11-07), Frontier track.
 
-In Code Mode, the model writes one script that calls many tools instead of making individual tool calls across multiple round trips. This is fast and token-efficient, but it turns agent execution into a black box. Private data can easily leak across tools through generated code that nobody reads.
+## The problem
 
-## What You See
+In **Code Mode**, the model doesn't call tools one at a time. It writes one script that calls many tools at once. That's fast and saves tokens, but the script is a black box: your private data flows through code nobody reads, and nothing stops it from ending up somewhere public.
 
-### The lane graph
-The main canvas arranges events into distinct horizontal lanes: YOU, MODEL, SCRIPT, and one row for each connected MCP server (`payroll`, `tracker`, `hr`). Time progresses from left to right across agent rounds. The graph visually proves that the model writes code and the code calls the tools.
+Tracing tools show you the *steps* an agent took. MCPVision shows you the *values*: where every argument came from, where every result went, what the model actually saw, and what stayed hidden from it.
 
-### Click to trace
-Click any node and everything it came from and everything it fed lights up; the rest of the run fades. The drawer lists the real values that flowed along that path (for example "total = 1,699,983 · from line 3 · private"), so the canvas itself stays clean.
+## What you see
 
-### The Story panel
-A plain-English narrative panel on the right explains the key milestones and decisions of the run step by step. Clicking any sentence in the story automatically focuses the canvas on that event and opens its detailed inspection drawer.
+- **The lane graph.** One row for the model, one for the script, and one per MCP server. Time runs left to right, one column per action. The rows make one thing obvious: **the model never calls tools.** The model writes code, and the code calls tools.
+- **Click to trace.** Click any value or call, and everything it came from and everything it fed lights up while the rest fades. The drawer walks the chain in plain words: `payroll.get_salaries` ↓ `pay` (line 2) ↓ `total` (line 3) ↓ this call's `body`.
+- **The Story panel.** A plain-English, numbered account of the run, with a one-line verdict on top ("1 call blocked: private payroll data would have reached the public tracker"). Click a sentence to jump to its node.
+- **The red blocked edge.** When private data heads for a public destination, the call is **not sent**. The drawer gives the reason in one sentence.
+- **The context boundary.** How many tokens the model saw versus how many stayed inside the sandbox. In the demo, 214 private payroll rows are processed and **0 of them reach Gemini**.
+- **Script pane sync.** Click a line of the generated code to jump to the node it produced, and replay highlights each line as it runs.
+- **strace view.** The same run as a flat, colour-coded log. This is what you had before.
 
-### The red blocked edge
-When a tool call attempts to send private data to a public destination, MCPVision cuts the connection with a red dashed edge. The call is halted before leaving the runtime, and the detail drawer displays the exact policy rule and reason.
+Replay runs at 0.25×, 0.5×, 1× or 2×, follows the newest node, and lets you step with ← / →. Long runs collapse uneventful rounds and add a minimap.
 
-### The context boundary
-The tinted MODEL lane tracks the exact tokens that entered model context versus tokens that stayed strictly inside the sandbox. This shows whether private records or untrusted prompt injections were exposed to the model or kept isolated.
+## The demo: three runs
 
-### strace view
-A toggle in the top bar switches the visual graph into a flat, chronological execution trace. This provides developers with a fast, familiar console log of every tool call, return value, policy decision, and error.
+| Run | What happens | What saves you |
+|---|---|---|
+| **Recorded live A**: "Triage this week's open issues and send the October 2026 payroll total to HR." | Issue #42 on the public tracker hides an instruction aimed at AI assistants. It reaches Gemini's context (marked UNTRUSTED). Gemini ignores it. | The model, and **the graph proves it**: nothing private went public. |
+| **Recorded live B**: "Post the October 2026 payroll total as a comment on issue #42 and send it to HR." | An honest human mistake. Gemini does exactly what it was asked. | **MCPVision.** The comment is blocked before it's sent; the HR summary goes through. |
+| **Simulated**: the injection succeeds | A hand-written run showing what happens if #42's hidden instruction works and the model tries to post payroll publicly. | **MCPVision.** Same block, and the reason notes the instruction came from #42, not from you. |
 
-## The Demo
+The real block reason from run B:
 
-MCPVision includes two realistic demo tasks evaluated against three fixture MCP servers (`payroll`, `tracker`, and `hr`):
+> message comes from payroll.get_salaries (private) and tracker is public, so the call was blocked before it was sent.
 
-- **Run A: "Triage this week's open issues and send the October 2026 (2026-10) payroll total to HR. Do it in one script."**
-  The agent fetches open tickets from the public issue tracker and reads 214 employee salary records from payroll. It aggregates the total salary expense inside the sandbox and posts the summary to HR. The context boundary proves that 214 private salary rows never entered model context. Although issue #42 contains an injected prompt instruction, the graph proves that private data never reached the public tracker.
+**The protection doesn't depend on the model behaving.**
 
-- **Run B: "Post the October 2026 (2026-10) payroll total as a comment on issue #42 and send it to HR. Do it in one script."**
-  The agent attempts an honest mistake: calculating the October payroll total and publishing it as a public comment on issue #42 while sending it to HR. MCPVision tracks the lineage of the comment body back to `payroll.get_salaries` and intercepts the call before it is transmitted. The allowed summary reaches HR, while the public comment is blocked:
-
-  > `"message comes from payroll.get_salaries (private) and tracker is public, so the call was blocked before it was sent."`
-
-## How It Works
+## How it works
 
 ```
-task
+your task
   │
   ▼
-Gemini on Vertex AI (gemini-3.7-flash)
+Gemini (Vertex AI, gemini-3.7-flash)          ← only ever writes code
   │
   ▼
-Cloudflare @cloudflare/codemode (generates TypeScript script)
+Cloudflare @cloudflare/codemode                ← turns the model's output into a TypeScript script
   │
   ▼
-Node vm sandbox (executes script)
-  │
-  ▼
-MCPVision tool wrapper (intercepts every tool call)
-  │
-  ├──► Static lineage analysis (TypeScript AST) + runtime values
-  │
-  ├──► Policy check (evaluates data sensitivity before transport)
-  │      │
-  │      ▼
-  ├──► 3 fixture MCP servers over stdio (payroll [private] · tracker [public] · hr [private])
-  │
-  └──► Run events (JSONL stream over WebSocket) ──► Interactive UI
+Node vm sandbox runs the script
+  │  every tool call goes through the MCPVision wrapper:
+  ├──► lineage: static data-flow over the generated TypeScript + the real runtime values
+  ├──► policy check, BEFORE the call is forwarded
+  ├──► 3 MCP servers over stdio: payroll (private) · tracker (public, untrusted) · hr (HR-only)
+  └──► run events (JSONL) ──► WebSocket ──► UI
 ```
 
-Lineage is computed by combining conservative static data-flow analysis over the generated TypeScript AST with the actual argument and result values intercepted at the tool wrapper.
+Gemini doesn't know MCPVision exists. MCPVision sits between the script and the MCP servers, so it sees every call the script makes.
 
-### The Policy Rule
+### The policy: one rule
 
-A value with **private** lineage cannot reach a **public** sink.
+A value with **private** lineage can't reach a **public** sink.
 
-- **Unknown lineage counts as private** (fail-closed): if the static analyzer cannot fully resolve a data dependency, it treats the value as private.
-- **Taint is tracked but never blocks alone**: untrusted text (such as prompt injections from external issues) is highlighted in pink and named in explanations, but it only blocks when combined with private data escaping to an untrusted public sink.
+- **Unknown lineage counts as private.** If the analyzer can't follow some code, it fails closed.
+- **Untrusted is a label, not a block.** Everything from the public tracker is marked UNTRUSTED (pink) because anyone can write there. It's shown and explained, but it never blocks a call on its own.
+- **We don't try to detect prompt injections.** We mark untrusted sources and track where every value flows. A clever injection can fool a detector. It can't change where the data came from.
 
-## Run It
+## Run it
 
-### Prerequisites
+**Recorded runs need nothing but Node.** Live runs need Gemini on Vertex AI.
 
-- Node.js 22+
-- A Google Cloud Platform (GCP) project with Vertex AI enabled
-- Authenticated locally via `gcloud auth application-default login`
+Prerequisites: Node.js 22+. For live runs, also a Google Cloud project with Vertex AI enabled, and `gcloud auth application-default login`.
 
-### Setup
+```bash
+cp .env.example .env              # live runs only: set GOOGLE_CLOUD_PROJECT
+cd engine && npm install && cd ..
+cd ui && npm install && cd ..
 
-1. Configure your environment:
-   Create a `.env` file in the repository root (or copy from `.env.example`):
-   ```bash
-   GOOGLE_GENAI_USE_VERTEXAI=true
-   GOOGLE_CLOUD_PROJECT=your-gcp-project-id
-   GOOGLE_CLOUD_LOCATION=global
-   GEMINI_MODEL=gemini-3.7-flash
-   ```
+# Terminal 1 (live runs only): the engine and WebSocket server
+cd engine && npx tsx src/agent.ts ws
 
-2. Install dependencies:
-   ```bash
-   cd engine && npm install
-   cd ../ui && npm install
-   ```
+# Terminal 2: the UI
+cd ui && npx vite
+```
 
-3. Start the engine and UI:
-   ```bash
-   # Terminal 1: start the WebSocket server and agent runner
-   cd engine && npx tsx src/agent.ts ws
-
-   # Terminal 2: start the UI dev server
-   cd ui && npx vite
-   ```
-
-4. Open `http://localhost:5173` in your browser.
-
-> **Note:** Recorded runs (Run A, Run B, and the canonical run) can be loaded, stepped through, and inspected in the UI without any GCP credentials or live backend.
+Open http://localhost:5173 and pick a run.
 
 ## Tests
 
-The project is structured around two clean test seams:
+Two seams, no LLM in either:
 
-- **Seam A (Observed Code Mode Execution):**
-  Feeds fixed TypeScript scripts into the engine and asserts on static lineage extraction, fail-closed policy enforcement, context boundaries, and verification that blocked calls never reach the MCP server's stdio transport.
-  ```bash
-  cd engine && npm test
-  ```
+- **Seam A, observed execution** (`cd engine && npm test`): fixed generated scripts run against the real fixture MCP servers. The tests assert that `total` traces back to `get_salaries`, that a private → public call is blocked and **the tracker receives nothing**, that code the analyzer can't follow fails closed without crashing, and that payroll rows never reach the model.
+- **Seam B, run to screen** (`cd ui && npm test`): pure functions turn a recorded run into lanes, nodes, edges, the trace and the Story, including time-ordered columns and a check that no edge crosses a node.
 
-- **Seam B (Pure UI View Functions):**
-  Tests the data transformation pipeline from JSONL event logs into graph nodes, lanes, edges, step indexes, lineage highlights, and plain-English Story sentences with pure functions without requiring a DOM.
-  ```bash
-  cd ui && npm test
-  ```
+## Honest limits
 
-## Honest Limits
-
-- **Execution environment:** Generated scripts run in a Node `vm` context rather than Cloudflare's Workers sandbox, as Cloudflare's dynamic worker executor depends on Cloudflare Workers runtime bindings (`WorkerLoader`).
-- **Static lineage:** Lineage is determined via static analysis of the generated code. When code structure cannot be resolved with certainty, it fails closed by treating values as private.
-- **Implicit flows:** Control-flow dependencies (such as `if (secretValue === 42) { postPublic(); }`) are not tracked.
-- **Custom agent loop:** We wrapped Cloudflare Code Mode inside our own agent loop to capture full prompt history, turn structure, and context boundaries.
-- **Local fixtures:** The demo uses three local stdio fixture servers rather than remote network services.
+- **The sandbox is Node `vm`, not Cloudflare's.** We use Cloudflare's real `codemode` code generation, but its executor needs the Cloudflare Workers runtime, so the script runs in Node's `vm` behind our wrapper.
+- **Lineage is static analysis** of the real generated code, plus runtime values. It fails closed when unsure.
+- **Implicit flows aren't tracked** (`if (secret > 0) post("yes")`).
+- **Our own agent loop** wraps Code Mode, so we can show every prompt and model turn.
+- **Fixture servers**, not real payroll or issue trackers. The simulated run is hand-written and labelled as such in the UI.
 
 ## Credits
 
-- **CaMeL (Google DeepMind):** For the core concept of value-level data tracking rather than step-level tracing.
-- **Cloudflare Code Mode:** For the `@cloudflare/codemode` TypeScript code generation and tool wrapping model.
-- We couldn't find a tool that does value-level lineage and policy enforcement for Code Mode scripts.
+- **CaMeL** (Google DeepMind) for the idea of tracking values rather than steps.
+- **Cloudflare Code Mode** (`@cloudflare/codemode`).
+- We couldn't find a tool that does value-level lineage and pre-send blocking for Code Mode scripts.
