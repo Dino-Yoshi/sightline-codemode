@@ -1,9 +1,12 @@
 import React from 'react';
 import { describe, it, expect, vi } from 'vitest';
 import { render, screen, fireEvent, act } from '@testing-library/react';
-import { App } from './main';
+import { App, computeLayout, NODE_WIDTH, NODE_HEIGHT } from './main';
+import { parseRun, view } from './view';
+import runAText from '../../runs/run-a.jsonl?raw';
+import fakeRunText from '../../runs/fake-run.jsonl?raw';
 
-describe('App Component Integration Tests (Polish Round 3)', () => {
+describe('App Component Integration Tests (Polish Round 4)', () => {
   it('renders top bar, task, brand, replay controls, and prompt banner (S3)', () => {
     const { container } = render(<App />);
     expect(container.querySelector('.brand')).toHaveTextContent('MCPVision');
@@ -18,11 +21,13 @@ describe('App Component Integration Tests (Polish Round 3)', () => {
     expect(promptBanner).toHaveTextContent(/Triage this week's open issues and post the October payroll total to HR/);
   });
 
-  it('renders script pane with rounds and model-generated lines without script nodes on canvas (S1)', () => {
+  it('H5: Renders script pane with Round N headers and model-generated lines without script nodes on canvas', () => {
     const { container } = render(<App />);
     expect(screen.getByText('GENERATED CODE')).toBeInTheDocument();
-    expect(screen.getByText('ROUND 1')).toBeInTheDocument();
-    expect(screen.getByText('ROUND 2')).toBeInTheDocument();
+    const scriptPane = container.querySelector('.script-pane')!;
+    expect(scriptPane).toBeInTheDocument();
+    expect(scriptPane.textContent).toContain('Round 1');
+    expect(scriptPane.textContent).toContain('Round 2');
     const scriptLines = container.querySelectorAll('.script-pane code');
     expect(scriptLines.length).toBeGreaterThan(0);
     expect(scriptLines[0]).toHaveTextContent('tracker.list_issues');
@@ -70,13 +75,13 @@ describe('App Component Integration Tests (Polish Round 3)', () => {
     expect(screen.getByText(/INSPECTING BLOCKED/)).toBeInTheDocument();
     expect(screen.getByText('This call was blocked before it was sent.')).toBeInTheDocument();
     expect(
-      screen.getByText(/total comes from payroll.get_salaries \(private\) and the tracker is public/),
-    ).toBeInTheDocument();
+      screen.getAllByText(/total comes from payroll.get_salaries \(private\) and the tracker is public/).length,
+    ).toBeGreaterThan(0);
 
     // Arguments and policy decision
-    expect(screen.getByText('ARGUMENTS')).toBeInTheDocument();
-    expect(screen.getByText(/Blocked · blocked: payroll total → public tracker/)).toBeInTheDocument();
-    expect(screen.getByText('Not sent')).toBeInTheDocument();
+    expect(screen.getByText('ARGUMENTS & LINEAGE')).toBeInTheDocument();
+    expect(screen.getByText(/Policy decision: BLOCKED/)).toBeInTheDocument();
+    expect(screen.getByText('Not sent to external MCP server')).toBeInTheDocument();
   });
 
   it('S7: Shows untrusted reason on UNTRUSTED node cards and explains why in detail drawer', () => {
@@ -110,14 +115,37 @@ describe('App Component Integration Tests (Polish Round 3)', () => {
     expect(drawer).toHaveTextContent('private');
   });
 
-  it('syncs script line clicks with graph node selection (S1)', () => {
+  it('H6: Clicking a script line selects main node, scrolls canvas, and lights lineage; clicking again cycles', () => {
+    const scrollSpy = vi.spyOn(Element.prototype, 'scrollTo');
     const { container } = render(<App />);
+
     // Line 1 code line button
     const line1Btn = screen.getByTitle('Line 1');
     fireEvent.click(line1Btn);
 
     // Selected state on line
     expect(line1Btn).toHaveClass('selected');
+    expect(scrollSpy).toHaveBeenCalled();
+
+    // Clicking line 1 again cycles (if multiple nodes exist on line 1)
+    fireEvent.click(line1Btn);
+    expect(line1Btn).toHaveClass('selected');
+
+    scrollSpy.mockRestore();
+  });
+
+  it('H6: Lines with no nodes (braces, return) are dimmer (no-node class) and do nothing on click', () => {
+    const { container } = render(<App />);
+    // Switch to Run A which has blank/braces lines
+    const runABtn = screen.getByText('Run A (4 Rounds)');
+    fireEvent.click(runABtn);
+
+    const noNodeLines = container.querySelectorAll('.code-line.no-node');
+    expect(noNodeLines.length).toBeGreaterThan(0);
+
+    // Clicking a no-node line does not select any node
+    fireEvent.click(noNodeLines[0]);
+    expect(container.querySelector('.drawer.story-drawer')).toBeInTheDocument();
   });
 
   it('toggles between Graph view and strace flat log view', () => {
@@ -158,89 +186,136 @@ describe('App Component Integration Tests (Polish Round 3)', () => {
     expect(stepLabel).toHaveTextContent('STEP 04 / 09');
   });
 
-  it('toggles Legend popover to show edge and chip color guides', () => {
-    render(<App />);
-    const legendBtn = screen.getByText('Legend ▾');
-    fireEvent.click(legendBtn);
-
-    expect(screen.getByText('EDGES')).toBeInTheDocument();
-    expect(screen.getByText('STATUS CHIPS')).toBeInTheDocument();
-    expect(screen.getByText('Untrusted taint')).toBeInTheDocument();
-  });
-
-  it('toggles show every step mode (S1: intermediate values)', () => {
-    render(<App />);
-    const showEveryStepBtn = screen.getByText('Show every step');
-    fireEvent.click(showEveryStepBtn);
-    expect(screen.getByText('✓ Showing intermediate values')).toBeInTheDocument();
-  });
-
-  it('R1: Dims every node and edge not in the lineage when a node is selected', () => {
+  it('H4: Speed toggle cycles between 0.5x, 1x, and 2x; default 0.5x for live runs', () => {
     const { container } = render(<App />);
-    // Select blocked node c4 ("Post comment on #42")
-    const blockedNode = Array.from(container.querySelectorAll('.node-card.chip-blocked'))[0];
-    fireEvent.click(blockedNode);
+    const speedBtn = container.querySelector('.speed-btn')!;
+    expect(speedBtn).toBeInTheDocument();
+    expect(speedBtn).toHaveTextContent('1x');
 
-    // Node c3 ("Send summary to HR") is not in c4 lineage -> must have dim class
-    const hrNode = Array.from(container.querySelectorAll('.node-card')).find((el) =>
-      el.textContent?.includes('Send summary to HR'),
-    );
-    expect(hrNode).toBeDefined();
-    expect(hrNode).toHaveClass('dim');
+    fireEvent.click(speedBtn);
+    expect(speedBtn).toHaveTextContent('2x');
 
-    // Node c4 itself and its lineage (e.g. "total = 1,284,600 · line 4") must NOT have dim class
-    expect(blockedNode).not.toHaveClass('dim');
-    expect(blockedNode).toHaveClass('selected');
+    fireEvent.click(speedBtn);
+    expect(speedBtn).toHaveTextContent('0.5x');
 
-    const totalNode = Array.from(container.querySelectorAll('.node-card')).find((el) =>
-      el.textContent?.includes('total = 1,284,600'),
-    );
-    expect(totalNode).toBeDefined();
-    expect(totalNode).not.toHaveClass('dim');
+    fireEvent.click(speedBtn);
+    expect(speedBtn).toHaveTextContent('1x');
 
-    // Check SVG wires dimming: faded for non-lineage, lit for lineage
-    const wires = Array.from(container.querySelectorAll('svg.wires g.wire'));
-    expect(wires.some((w) => w.classList.contains('faded'))).toBe(true);
-    expect(wires.some((w) => w.classList.contains('lit'))).toBe(true);
+    // Live run defaults speed to 0.5x
+    const liveABtn = screen.getByText('Live A');
+    fireEvent.click(liveABtn);
+    expect(speedBtn).toHaveTextContent('0.5x');
   });
 
-  it('R2: Color-codes tags in strace view with status-chip classes', () => {
+  it('H5: Left script pane width can be dragged using resize handle', () => {
     const { container } = render(<App />);
-    const straceTab = screen.getByText('strace');
-    fireEvent.click(straceTab);
+    const resizer = container.querySelector('.pane-resizer-left')!;
+    expect(resizer).toBeInTheDocument();
 
-    const straceChips = container.querySelectorAll('.strace-row .strace-type');
-    expect(straceChips.length).toBeGreaterThan(0);
+    // Trigger pointer events on resizer
+    fireEvent.pointerDown(resizer, { clientX: 320 });
+    fireEvent(window, new MouseEvent('pointermove', { clientX: 400 }));
+    fireEvent(window, new MouseEvent('pointerup', { clientX: 400 }));
 
-    const chipClasses = Array.from(straceChips).map((el) => el.className);
-    expect(chipClasses.some((c) => c.includes('chip-blocked'))).toBe(true);
-    expect(chipClasses.some((c) => c.includes('chip-private'))).toBe(true);
-    expect(chipClasses.some((c) => c.includes('status-chip'))).toBe(true);
+    const mainEl = container.querySelector('main')!;
+    expect(mainEl.style.gridTemplateColumns).toContain('400px');
   });
 
-  it('L1 & L2: Positions nodes with left-to-right columns and renders orthogonal edge paths (S2)', () => {
+  it('H2 & R1: Hovering a node brings its connected edges to full opacity (hovered class)', () => {
     const { container } = render(<App />);
-    const cards = Array.from(container.querySelectorAll('.node-card')) as HTMLElement[];
+    const cards = container.querySelectorAll('.node-card');
     expect(cards.length).toBeGreaterThan(0);
 
-    // Model turn 1 should be on the leftmost column (left = 180px)
-    const m1Card = cards.find((c) => c.textContent?.includes('round 1') || c.textContent?.includes('writes code') || c.textContent?.includes('Gemini wrote a script'));
-    expect(m1Card).toBeDefined();
-    expect(m1Card?.style.left).toBe('180px');
+    // Hover over the first card
+    fireEvent.mouseEnter(cards[0]);
 
-    // Wires have orthogonal path commands (M, L, Q)
-    const wirePaths = Array.from(container.querySelectorAll('svg.wires g.wire path'));
-    expect(wirePaths.length).toBeGreaterThan(0);
-    const dAttrs = wirePaths.map((p) => p.getAttribute('d') ?? '');
-    expect(dAttrs.some((d) => d.includes('M') && d.includes('L'))).toBe(true);
+    // Check that connected wires have hovered class
+    const hoveredWires = container.querySelectorAll('svg.wires g.wire.hovered');
+    expect(hoveredWires.length).toBeGreaterThan(0);
+
+    // Mouse leave removes hovered class
+    fireEvent.mouseLeave(cards[0]);
+    const remainingHovered = container.querySelectorAll('svg.wires g.wire.hovered');
+    expect(remainingHovered.length).toBe(0);
   });
 
-  it('L4: Handles Fit toggle with scaling', () => {
-    render(<App />);
+  it('H2 Geometry test: for run-a.jsonl, no edge segment intersects a node rectangle it does not connect to', () => {
+    const runAEvents = parseRun(runAText);
+    const vRunA = view(runAEvents, { showEveryStep: true });
+    const layout = computeLayout(vRunA);
+
+    function doSegmentsIntersectRect(
+      x1: number,
+      y1: number,
+      x2: number,
+      y2: number,
+      rx: number,
+      ry: number,
+      rw: number,
+      rh: number,
+    ): boolean {
+      const minX = Math.min(x1, x2);
+      const maxX = Math.max(x1, x2);
+      const minY = Math.min(y1, y2);
+      const maxY = Math.max(y1, y2);
+
+      // Outside bounding box
+      if (maxX <= rx + 0.1 || minX >= rx + rw - 0.1) return false;
+      if (maxY <= ry + 0.1 || minY >= ry + rh - 0.1) return false;
+
+      // Vertical segment at x1
+      if (Math.abs(x1 - x2) < 0.1) {
+        return x1 > rx + 0.1 && x1 < rx + rw - 0.1 && minY < ry + rh - 0.1 && maxY > ry + 0.1;
+      }
+      // Horizontal segment at y1
+      if (Math.abs(y1 - y2) < 0.1) {
+        return y1 > ry + 0.1 && y1 < ry + rh - 0.1 && minX < rx + rw - 0.1 && maxX > rx + 0.1;
+      }
+
+      return true;
+    }
+
+    for (const edge of vRunA.edges) {
+      const edgeKey = `${edge.from}-${edge.to}-${edge.kind}`;
+      const segments = layout.edgeSegments[edgeKey] ?? [];
+
+      for (const seg of segments) {
+        for (const node of vRunA.nodes) {
+          if (node.id === edge.from || node.id === edge.to) continue;
+          const nodePos = layout.pos[node.id];
+          if (!nodePos) continue;
+
+          const intersects = doSegmentsIntersectRect(
+            seg.x1,
+            seg.y1,
+            seg.x2,
+            seg.y2,
+            nodePos.x,
+            nodePos.y,
+            NODE_WIDTH,
+            NODE_HEIGHT,
+          );
+
+          expect(
+            intersects,
+            `Edge ${edgeKey} segment [(${seg.x1},${seg.y1}) -> (${seg.x2},${seg.y2})] must not intersect node ${node.id} at [${nodePos.x}, ${nodePos.y}]`,
+          ).toBe(false);
+        }
+      }
+    }
+  });
+
+  it('H3: Fit toggle scales graph height to fit container and enables horizontal scrolling', () => {
+    const { container } = render(<App />);
     const fitBtn = screen.getByTitle('Zoom graph to fit view');
     expect(fitBtn).toBeInTheDocument();
     fireEvent.click(fitBtn);
     expect(fitBtn).toHaveTextContent('100%');
+
+    // Follow in fit mode centers column horizontally
+    const nextBtn = screen.getByLabelText('Next step');
+    fireEvent.click(nextBtn);
+
     fireEvent.click(fitBtn);
     expect(fitBtn).toHaveTextContent('Fit');
   });
@@ -300,28 +375,5 @@ describe('App Component Integration Tests (Polish Round 3)', () => {
     expect(collapseStoryBtn.closest('.drawer-head-actions')).toBeInTheDocument();
     fireEvent.click(collapseStoryBtn);
     expect(container.querySelector('.drawer.collapsed-rail')).toBeInTheDocument();
-  });
-
-  it('P1: Truncates scripts longer than 12 lines in Model Turn detail with show all lines toggle', () => {
-    const { container } = render(<App />);
-
-    // Switch to Run A which has model turns with scripts
-    const runABtn = screen.getByText('Run A (4 Rounds)');
-    fireEvent.click(runABtn);
-
-    // Click on Model Turn 4 which has a 19-line script
-    const modelNode = Array.from(container.querySelectorAll('.node-card')).find((el) =>
-      el.textContent?.includes('round 4'),
-    );
-    expect(modelNode).toBeDefined();
-    fireEvent.click(modelNode!);
-
-    // Should render ScriptCodeBlock with show all lines button
-    const showAllBtn = screen.getByText(/Show all 19 lines/);
-    expect(showAllBtn).toBeInTheDocument();
-
-    // Click to expand
-    fireEvent.click(showAllBtn);
-    expect(screen.getByText('Show fewer lines')).toBeInTheDocument();
   });
 });

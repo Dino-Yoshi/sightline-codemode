@@ -14,7 +14,7 @@ import {
 } from './view';
 import './style.css';
 
-const presetRuns: Record<string, { label: string; text: string }> = {
+export const presetRuns: Record<string, { label: string; text: string }> = {
   fake: { label: 'Fake Run (Demo)', text: fakeRunText },
   runA: { label: 'Run A (4 Rounds)', text: runAText },
   runB: { label: 'Run B (Blocked)', text: runBText },
@@ -22,7 +22,7 @@ const presetRuns: Record<string, { label: string; text: string }> = {
 
 const fmt = (n: number) => n.toLocaleString();
 
-const LANE_SUBTITLES: Record<string, string> = {
+export const LANE_SUBTITLES: Record<string, string> = {
   MODEL: 'Gemini: writes code, never calls tools',
   SCRIPT: 'the code it wrote, running in a sandbox',
   payroll: 'private data',
@@ -30,12 +30,337 @@ const LANE_SUBTITLES: Record<string, string> = {
   hr: 'HR only',
 };
 
-const NODE_WIDTH = 220;
-const NODE_HEIGHT = 80;
-const CARD_GAP_Y = 14;
-const COLUMN_WIDTH = 290;
-const GUTTER_WIDTH = 70;
-const LEFT_OFFSET = 180;
+export const NODE_WIDTH = 220;
+export const NODE_HEIGHT = 80;
+export const CARD_GAP_Y = 14;
+export const COLUMN_WIDTH = 290;
+export const GUTTER_WIDTH = 70;
+export const LEFT_OFFSET = 180;
+
+export function orthogonalPath(points: Array<{ x: number; y: number }>, radius = 6): string {
+  if (points.length < 2) return '';
+  const pts: Array<{ x: number; y: number }> = [];
+  for (const p of points) {
+    if (
+      pts.length === 0 ||
+      Math.abs(pts[pts.length - 1].x - p.x) > 0.5 ||
+      Math.abs(pts[pts.length - 1].y - p.y) > 0.5
+    ) {
+      pts.push(p);
+    }
+  }
+  if (pts.length < 2) return '';
+  if (pts.length === 2) {
+    return `M ${pts[0].x} ${pts[0].y} L ${pts[1].x} ${pts[1].y}`;
+  }
+
+  let d = `M ${pts[0].x} ${pts[0].y}`;
+  for (let i = 1; i < pts.length - 1; i++) {
+    const pPrev = pts[i - 1];
+    const pCur = pts[i];
+    const pNext = pts[i + 1];
+
+    const dx1 = pCur.x - pPrev.x;
+    const dy1 = pCur.y - pPrev.y;
+    const len1 = Math.hypot(dx1, dy1);
+
+    const dx2 = pNext.x - pCur.x;
+    const dy2 = pNext.y - pCur.y;
+    const len2 = Math.hypot(dx2, dy2);
+
+    const r = Math.min(radius, len1 / 2, len2 / 2);
+
+    const startCornerX = pCur.x - (dx1 / len1) * r;
+    const startCornerY = pCur.y - (dy1 / len1) * r;
+    const endCornerX = pCur.x + (dx2 / len2) * r;
+    const endCornerY = pCur.y + (dy2 / len2) * r;
+
+    d += ` L ${startCornerX} ${startCornerY} Q ${pCur.x} ${pCur.y}, ${endCornerX} ${endCornerY}`;
+  }
+  d += ` L ${pts[pts.length - 1].x} ${pts[pts.length - 1].y}`;
+  return d;
+}
+
+export function getNodesForLine(graphNodes: Node[], round: number, lineNum: number): Node[] {
+  const matching = graphNodes.filter((n) => {
+    const nodeRound = n.round ?? 1;
+    if (nodeRound !== round) return false;
+    if (n.line === lineNum) return true;
+    if (n.event?.line === lineNum) return true;
+    return false;
+  });
+
+  // Sort by priority: tool call or blocked first, then value, then other
+  matching.sort((a, b) => {
+    const priority = (kind: string) => {
+      if (kind === 'call' || kind === 'blocked') return 1;
+      if (kind === 'value') return 2;
+      return 3;
+    };
+    return priority(a.kind) - priority(b.kind);
+  });
+
+  return matching;
+}
+
+export function computeLayout(graph: { nodes: Node[]; edges: Edge[]; lanes: string[] }) {
+  const laneHeightMap: Record<string, number> = {};
+  const laneTopMap: Record<string, number> = {};
+  const pos: Record<string, { x: number; y: number; col: number }> = {};
+
+  const maxCol = Math.max(1, ...graph.nodes.map((n) => n.column ?? 1));
+
+  // Calculate max stacked items in any column for each lane
+  for (const lane of graph.lanes) {
+    const laneNodes = graph.nodes.filter((n) => n.lane === lane);
+    const colCounts: Record<number, number> = {};
+
+    for (const node of laneNodes) {
+      const c = node.column ?? 1;
+      colCounts[c] = (colCounts[c] ?? 0) + 1;
+    }
+
+    const maxStack = Math.max(1, ...Object.values(colCounts), 1);
+    const height = Math.max(130, 44 + maxStack * NODE_HEIGHT + Math.max(0, maxStack - 1) * CARD_GAP_Y + 24);
+    laneHeightMap[lane] = height;
+  }
+
+  // Cumulative Y offsets with 32px gap between lanes (channel space)
+  let currentTop = 24;
+  for (const lane of graph.lanes) {
+    laneTopMap[lane] = currentTop;
+    currentTop += laneHeightMap[lane] + 32;
+  }
+
+  const totalHeight = currentTop + 40;
+
+  // Position each node: within lane and column, ordered by time / event order
+  for (const lane of graph.lanes) {
+    const laneNodes = graph.nodes.filter((n) => n.lane === lane);
+    const byCol = new Map<number, Node[]>();
+    for (const node of laneNodes) {
+      const c = node.column ?? 1;
+      if (!byCol.has(c)) byCol.set(c, []);
+      byCol.get(c)!.push(node);
+    }
+
+    for (const [col, colNodes] of byCol.entries()) {
+      colNodes.forEach((node, stackIdx) => {
+        const laneTop = laneTopMap[lane] ?? 24;
+        const x = LEFT_OFFSET + (col - 1) * COLUMN_WIDTH;
+        const y = laneTop + 44 + stackIdx * (NODE_HEIGHT + CARD_GAP_Y);
+        pos[node.id] = { x, y, col };
+      });
+    }
+  }
+
+  const totalWidth = Math.max(1100, LEFT_OFFSET + maxCol * COLUMN_WIDTH + 100);
+
+  // --- H2 Orthogonal Edge Routing with Inter-Lane Channels & Vertical Gutter Tracks ---
+  // 1. Determine incoming and outgoing edges per node
+  const incomingMap = new Map<string, Edge[]>();
+  const outgoingMap = new Map<string, Edge[]>();
+  for (const n of graph.nodes) {
+    incomingMap.set(n.id, []);
+    outgoingMap.set(n.id, []);
+  }
+  for (const e of graph.edges) {
+    if (incomingMap.has(e.to)) incomingMap.get(e.to)!.push(e);
+    if (outgoingMap.has(e.from)) outgoingMap.get(e.from)!.push(e);
+  }
+
+  // 2. Identify channels and gutters used by edges
+  // Channel indices:
+  // channel -1: above lane 0 (at laneTopMap[0] - 16)
+  // channel i (0 <= i < lanes.length - 1): between lane i and lane i+1 (at laneTopMap[i+1] - 16)
+  // channel lanes.length - 1: below last lane
+  const channelEdges = new Map<number, Edge[]>();
+  const gutterEdges = new Map<number, Edge[]>();
+
+  const getChannelBaseY = (chIdx: number): number => {
+    if (graph.lanes.length === 0) return 20;
+    if (chIdx < 0) return Math.max(12, (laneTopMap[graph.lanes[0]] ?? 24) - 16);
+    if (chIdx >= graph.lanes.length - 1) {
+      const lastLane = graph.lanes[graph.lanes.length - 1];
+      return (laneTopMap[lastLane] ?? 24) + (laneHeightMap[lastLane] ?? 130) + 16;
+    }
+    const nextLane = graph.lanes[chIdx + 1];
+    return (laneTopMap[nextLane] ?? 24) - 16;
+  };
+
+  const getGutterBaseX = (col: number): number => {
+    return LEFT_OFFSET + (col - 1) * COLUMN_WIDTH - GUTTER_WIDTH / 2;
+  };
+
+  const edgeChannelMap = new Map<string, number>();
+
+  for (const e of graph.edges) {
+    const nodeFrom = graph.nodes.find((n) => n.id === e.from);
+    const nodeTo = graph.nodes.find((n) => n.id === e.to);
+    if (!nodeFrom || !nodeTo) continue;
+
+    const laneFromIdx = graph.lanes.indexOf(nodeFrom.lane);
+    const laneToIdx = graph.lanes.indexOf(nodeTo.lane);
+    const pFrom = pos[e.from];
+    const pTo = pos[e.to];
+    if (!pFrom || !pTo) continue;
+
+    // Determine target channel (gap just above or below target lane per H2(a))
+    let ch = laneToIdx - 1;
+    if (laneFromIdx > laneToIdx) {
+      ch = laneToIdx; // just below target lane
+    } else {
+      ch = laneToIdx - 1; // just above target lane
+    }
+    edgeChannelMap.set(`${e.from}-${e.to}-${e.kind}`, ch);
+
+    if (!channelEdges.has(ch)) channelEdges.set(ch, []);
+    channelEdges.get(ch)!.push(e);
+
+    // Vertical gutter left of target column
+    const gIn = pTo.col;
+    if (!gutterEdges.has(gIn)) gutterEdges.set(gIn, []);
+    gutterEdges.get(gIn)!.push(e);
+
+    // If source needs exit vertical run in gutter right of source column
+    if (pTo.col > pFrom.col + 1 || laneFromIdx !== laneToIdx || pTo.col === pFrom.col) {
+      const gOut = pFrom.col + 1;
+      if (!gutterEdges.has(gOut)) gutterEdges.set(gOut, []);
+      if (!gutterEdges.get(gOut)!.includes(e)) {
+        gutterEdges.get(gOut)!.push(e);
+      }
+    }
+  }
+
+  // 3. Compute 6px track offsets for channel and gutter runs
+  const edgeChannelTrackY = new Map<string, number>();
+  for (const [ch, edges] of channelEdges.entries()) {
+    const sorted = [...edges].sort((a, b) => {
+      const yA = pos[a.to]?.y ?? 0;
+      const yB = pos[b.to]?.y ?? 0;
+      return yA - yB;
+    });
+    const baseY = getChannelBaseY(ch);
+    const count = sorted.length;
+    sorted.forEach((e, idx) => {
+      const offset = (idx - (count - 1) / 2) * 6;
+      edgeChannelTrackY.set(`${e.from}-${e.to}-${e.kind}`, baseY + offset);
+    });
+  }
+
+  const edgeGutterTrackX = new Map<string, number>(); // key: `${gutter}-${from}-${to}-${kind}`
+  for (const [g, edges] of gutterEdges.entries()) {
+    const sorted = [...edges].sort((a, b) => {
+      const yA = pos[a.to]?.y ?? 0;
+      const yB = pos[b.to]?.y ?? 0;
+      return yA - yB;
+    });
+    const baseX = getGutterBaseX(g);
+    const count = sorted.length;
+    sorted.forEach((e, idx) => {
+      const offset = (idx - (count - 1) / 2) * 6;
+      edgeGutterTrackX.set(`${g}-${e.from}-${e.to}-${e.kind}`, baseX + offset);
+    });
+  }
+
+  // 4. Generate paths and line segments
+  const edgePaths: Record<string, string> = {};
+  const edgeSegments: Record<string, Array<{ x1: number; y1: number; x2: number; y2: number }>> = {};
+
+  for (const e of graph.edges) {
+    const pFrom = pos[e.from];
+    const pTo = pos[e.to];
+    if (!pFrom || !pTo) continue;
+
+    const inList = incomingMap.get(e.to) ?? [];
+    const inIdx = inList.indexOf(e);
+    const inCount = Math.max(1, inList.length);
+
+    // H2(c): Arrows into a node are spread across its left side instead of hitting one point
+    const yEntry = pTo.y + ((inIdx + 1) * NODE_HEIGHT) / (inCount + 1);
+    const xEntry = pTo.x;
+
+    const outList = outgoingMap.get(e.from) ?? [];
+    const outIdx = outList.indexOf(e);
+    const outCount = Math.max(1, outList.length);
+    const yExit = pFrom.y + ((outIdx + 1) * NODE_HEIGHT) / (outCount + 1);
+    const xExit = pFrom.x + NODE_WIDTH;
+
+    const edgeKey = `${e.from}-${e.to}-${e.kind}`;
+    const ch = edgeChannelMap.get(edgeKey) ?? 0;
+    const yChannel = edgeChannelTrackY.get(edgeKey) ?? getChannelBaseY(ch);
+
+    const xIn = edgeGutterTrackX.get(`${pTo.col}-${edgeKey}`) ?? getGutterBaseX(pTo.col);
+    const xOut = edgeGutterTrackX.get(`${pFrom.col + 1}-${edgeKey}`) ?? getGutterBaseX(pFrom.col + 1);
+
+    const nodeFrom = graph.nodes.find((n) => n.id === e.from);
+    const nodeTo = graph.nodes.find((n) => n.id === e.to);
+    const sameLane = nodeFrom && nodeTo && nodeFrom.lane === nodeTo.lane;
+
+    let points: Array<{ x: number; y: number }> = [];
+
+    if (pTo.col > pFrom.col && pTo.col === pFrom.col + 1 && sameLane && Math.abs(yExit - yEntry) < 2) {
+      // Direct horizontal neighbor in same lane
+      points = [
+        { x: xExit, y: yExit },
+        { x: xEntry, y: yEntry },
+      ];
+    } else if (pTo.col > pFrom.col && pTo.col === pFrom.col + 1 && sameLane) {
+      // Adjacent column, same lane: vertical turn in the gutter between them
+      points = [
+        { x: xExit, y: yExit },
+        { x: xIn, y: yExit },
+        { x: xIn, y: yEntry },
+        { x: xEntry, y: yEntry },
+      ];
+    } else if (pTo.col > pFrom.col) {
+      // Multiple columns or different lanes: exit to gutter -> channel -> entry gutter -> target
+      points = [
+        { x: xExit, y: yExit },
+        { x: xOut, y: yExit },
+        { x: xOut, y: yChannel },
+        { x: xIn, y: yChannel },
+        { x: xIn, y: yEntry },
+        { x: xEntry, y: yEntry },
+      ];
+    } else {
+      // Same column (e.g. call and result sharing a column)
+      points = [
+        { x: xExit, y: yExit },
+        { x: xOut, y: yExit },
+        { x: xOut, y: yChannel },
+        { x: xIn, y: yChannel },
+        { x: xIn, y: yEntry },
+        { x: xEntry, y: yEntry },
+      ];
+    }
+
+    edgePaths[edgeKey] = orthogonalPath(points, 6);
+
+    // Save straight segments for geometry intersection verification
+    const segments: Array<{ x1: number; y1: number; x2: number; y2: number }> = [];
+    for (let i = 0; i < points.length - 1; i++) {
+      segments.push({
+        x1: points[i].x,
+        y1: points[i].y,
+        x2: points[i + 1].x,
+        y2: points[i + 1].y,
+      });
+    }
+    edgeSegments[edgeKey] = segments;
+  }
+
+  return {
+    pos,
+    laneHeightMap,
+    laneTopMap,
+    totalHeight,
+    totalWidth,
+    edgePaths,
+    edgeSegments,
+    maxCol,
+  };
+}
 
 export function App() {
   const [source, setSource] = useState<'recorded' | 'live'>('recorded');
@@ -46,30 +371,32 @@ export function App() {
   const [wsStatus, setWsStatus] = useState<'idle' | 'connecting' | 'connected' | 'error'>('idle');
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
-  // Feature Toggles (Spec 4a, 6, 8, Polish F3, F4)
+  // Feature Toggles (H4: 0.5x / 1x / 2x speed toggle, default 0.5x on live runs)
   const [userShowEveryStep, setUserShowEveryStep] = useState<boolean>(false);
-  const [replaySpeed, setReplaySpeed] = useState<1 | 2>(1);
+  const [replaySpeed, setReplaySpeed] = useState<0.5 | 1 | 2>(1);
   const [isFit, setIsFit] = useState<boolean>(false);
   const [autoFollow, setAutoFollow] = useState<boolean>(true);
   const [showLegend, setShowLegend] = useState<boolean>(false);
 
-  // Side Panes and Focus Mode (Polish F4, S5)
+  // Side Panes and Focus Mode (H5: draggable pane width)
+  const [leftPaneWidth, setLeftPaneWidth] = useState<number>(320);
   const [leftCollapsed, setLeftCollapsed] = useState<boolean>(false);
   const [rightCollapsed, setRightCollapsed] = useState<boolean>(false);
   const [focusMode, setFocusMode] = useState<boolean>(true);
 
-  // Playback & Animation (Polish F1)
+  // Playback & Animation
   const [playing, setPlaying] = useState<boolean>(false);
   const [justRevealedId, setJustRevealedId] = useState<string | null>(null);
+  const [hoveredNodeId, setHoveredNodeId] = useState<string | null>(null);
 
-  // Live queue ref (Polish F2)
+  // Live queue ref
   const liveQueueRef = useRef<RunEvent[]>([]);
 
   const canvasScrollRef = useRef<HTMLDivElement>(null);
   const isAutoScrollingRef = useRef<boolean>(false);
   const scriptContainerRef = useRef<HTMLElement>(null);
 
-  // Dynamic detail level during playback/streaming (Polish F3)
+  // Dynamic detail level during playback/streaming
   const effectiveShowEveryStep = playing || isStreaming ? true : userShowEveryStep;
 
   const rawEvents = useMemo(() => {
@@ -102,7 +429,7 @@ export function App() {
     }
   }, [recordedKey, source, graph.steps, playing, isStreaming]);
 
-  // Live run WebSocket starter (Polish F2)
+  // Live run WebSocket starter (H4: default to 0.5x speed on live runs)
   const startLiveRun = useCallback((taskKey: 'A' | 'B') => {
     setSource('live');
     setLiveTask(taskKey);
@@ -113,6 +440,7 @@ export function App() {
     setIsStreaming(true);
     setWsStatus('connecting');
     setAutoFollow(true);
+    setReplaySpeed(0.5);
 
     try {
       const ws = new WebSocket('ws://localhost:8765');
@@ -144,11 +472,11 @@ export function App() {
     }
   }, []);
 
-  // Live queue pacing timer (Polish F2: ~450ms at 1x)
+  // Live queue pacing timer
   useEffect(() => {
     if (!isStreaming && liveQueueRef.current.length === 0) return;
 
-    const interval = replaySpeed === 2 ? 225 : 450;
+    const interval = Math.round(450 / replaySpeed);
     const timer = setInterval(() => {
       if (liveQueueRef.current.length > 0) {
         const nextEvent = liveQueueRef.current.shift()!;
@@ -180,125 +508,12 @@ export function App() {
     return new Set(visibleNodes.map((n) => n.id));
   }, [visibleNodes]);
 
-  // Layered Layout computation & Orthogonal routing (Polish L1, L2, L3, S2, S3)
+  // Layout computation & Orthogonal routing
   const layout = useMemo(() => {
-    const laneHeightMap: Record<string, number> = {};
-    const laneTopMap: Record<string, number> = {};
-    const pos: Record<string, { x: number; y: number; col: number }> = {};
+    return computeLayout(graph);
+  }, [graph]);
 
-    const maxCol = Math.max(1, ...graph.nodes.map((n) => n.column ?? 1));
-
-    // Calculate max stacked items in any column for each lane
-    for (const lane of graph.lanes) {
-      const laneNodes = graph.nodes.filter((n) => n.lane === lane);
-      const colCounts: Record<number, number> = {};
-
-      for (const node of laneNodes) {
-        const c = node.column ?? 1;
-        colCounts[c] = (colCounts[c] ?? 0) + 1;
-      }
-
-      const maxStack = Math.max(1, ...Object.values(colCounts), 1);
-      const height = Math.max(130, 44 + maxStack * NODE_HEIGHT + Math.max(0, maxStack - 1) * CARD_GAP_Y + 24);
-      laneHeightMap[lane] = height;
-    }
-
-    // Cumulative Y offsets starting with reserved top strip (S5)
-    let currentTop = 24;
-    for (const lane of graph.lanes) {
-      laneTopMap[lane] = currentTop;
-      currentTop += laneHeightMap[lane] + 16;
-    }
-
-    const totalHeight = currentTop + 40;
-
-    // Position each node: within lane and column, ordered by first-seen order
-    for (const lane of graph.lanes) {
-      const laneNodes = graph.nodes.filter((n) => n.lane === lane);
-      const byCol = new Map<number, Node[]>();
-      for (const node of laneNodes) {
-        const c = node.column ?? 1;
-        if (!byCol.has(c)) byCol.set(c, []);
-        byCol.get(c)!.push(node);
-      }
-
-      for (const [col, colNodes] of byCol.entries()) {
-        colNodes.forEach((node, stackIdx) => {
-          const laneTop = laneTopMap[lane] ?? 24;
-          const x = LEFT_OFFSET + (col - 1) * COLUMN_WIDTH;
-          const y = laneTop + 44 + stackIdx * (NODE_HEIGHT + CARD_GAP_Y);
-          pos[node.id] = { x, y, col };
-        });
-      }
-    }
-
-    const totalWidth = Math.max(1100, LEFT_OFFSET + maxCol * COLUMN_WIDTH + 100);
-
-    // Compute orthogonal edge routes and 6px vertical tracks per gutter (Polish L2)
-    const gutterEdges = new Map<number, Edge[]>();
-    for (const edge of graph.edges) {
-      const pFrom = pos[edge.from];
-      const pTo = pos[edge.to];
-      if (!pFrom || !pTo) continue;
-      const g = pFrom.col;
-      if (!gutterEdges.has(g)) gutterEdges.set(g, []);
-      gutterEdges.get(g)!.push(edge);
-    }
-
-    const edgePaths: Record<string, string> = {};
-    for (const [g, edges] of gutterEdges.entries()) {
-      const sortedEdges = [...edges].sort((a, b) => {
-        const yAFrom = pos[a.from]?.y ?? 0;
-        const yBFrom = pos[b.from]?.y ?? 0;
-        if (yAFrom !== yBFrom) return yAFrom - yBFrom;
-        const yATo = pos[a.to]?.y ?? 0;
-        const yBTo = pos[b.to]?.y ?? 0;
-        return yATo - yBTo;
-      });
-
-      const count = sortedEdges.length;
-      const xMid = LEFT_OFFSET + (g - 1) * COLUMN_WIDTH + NODE_WIDTH + GUTTER_WIDTH / 2;
-
-      sortedEdges.forEach((e, idx) => {
-        const pFrom = pos[e.from];
-        const pTo = pos[e.to];
-        if (!pFrom || !pTo) return;
-
-        const x1 = pFrom.x + NODE_WIDTH;
-        const y1 = pFrom.y + NODE_HEIGHT / 2;
-        const x2 = pTo.x;
-        const y2 = pTo.y + NODE_HEIGHT / 2;
-
-        const trackOffset = (idx - (count - 1) / 2) * 6;
-        const xTrack = xMid + trackOffset;
-
-        let pathStr = '';
-        if (Math.abs(y1 - y2) < 2 && pTo.col === pFrom.col + 1) {
-          pathStr = `M ${x1} ${y1} L ${x2} ${y2}`;
-        } else {
-          const R = Math.min(8, Math.max(2, Math.abs(xTrack - x1) / 2), Math.max(2, Math.abs(y2 - y1) / 2));
-          if (y2 > y1) {
-            pathStr = `M ${x1} ${y1} L ${xTrack - R} ${y1} Q ${xTrack} ${y1}, ${xTrack} ${y1 + R} L ${xTrack} ${y2 - R} Q ${xTrack} ${y2}, ${xTrack + R} ${y2} L ${x2} ${y2}`;
-          } else {
-            pathStr = `M ${x1} ${y1} L ${xTrack - R} ${y1} Q ${xTrack} ${y1}, ${xTrack} ${y1 - R} L ${xTrack} ${y2 + R} Q ${xTrack} ${y2}, ${xTrack + R} ${y2} L ${x2} ${y2}`;
-          }
-        }
-        edgePaths[`${e.from}-${e.to}-${e.kind}`] = pathStr;
-      });
-    }
-
-    return {
-      pos,
-      laneHeightMap,
-      laneTopMap,
-      totalHeight,
-      totalWidth,
-      edgePaths,
-      maxCol,
-    };
-  }, [graph.nodes, graph.lanes, graph.edges]);
-
-  // Round Headers & Vertical Dividers (S2: Group headers say "Round N")
+  // Round Headers & Vertical Dividers (H1: Rounds stay as column groups with headers)
   const roundInfo = useMemo(() => {
     const rounds: Array<{ round: number; startX: number }> = [];
     const allRounds = Array.from(new Set(graph.nodes.map((n) => n.round ?? 1))).sort((a, b) => a - b);
@@ -316,14 +531,14 @@ export function App() {
     return rounds;
   }, [graph.nodes]);
 
-  // Replay timer (Polish F1)
+  // Replay timer
   useEffect(() => {
     if (!playing) return;
     if (step >= maxStep) {
       setPlaying(false);
       return;
     }
-    const interval = replaySpeed === 2 ? 350 : 700;
+    const interval = Math.round(700 / replaySpeed);
     const timer = setTimeout(() => {
       setStep((s) => {
         const next = Math.min(maxStep, s + 1);
@@ -346,7 +561,7 @@ export function App() {
     return () => clearTimeout(timer);
   }, [justRevealedId]);
 
-  // Keyboard navigation & S4 follow switch off
+  // Keyboard navigation
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement;
@@ -380,9 +595,18 @@ export function App() {
     }
   }, [step, selectedId, visibleNodeIds]);
 
-  // Auto-scroll centering newest node when replaying or streaming (Polish F1, S4)
+  // Fit Scale (H3: in Fit mode graph keeps its fitted height and scrolls horizontally)
+  const fitScale = useMemo(() => {
+    if (!isFit || !canvasScrollRef.current) return 1;
+    const container = canvasScrollRef.current;
+    const availableHeight = container.clientHeight - 32;
+    const scaleY = availableHeight / layout.totalHeight;
+    return Math.min(1, Math.max(0.3, scaleY));
+  }, [isFit, layout.totalHeight]);
+
+  // Auto-scroll centering newest node when replaying or streaming (H3: follow keeps newest column in view in Fit mode too)
   useEffect(() => {
-    if (!autoFollow || isFit) return;
+    if (!autoFollow) return;
     const scrollContainer = canvasScrollRef.current;
     if (!scrollContainer) return;
 
@@ -390,12 +614,13 @@ export function App() {
     const targetNode = activeNodes.at(-1) ?? visibleNodes.at(-1);
     if (!targetNode) return;
 
-    const pos = layout.pos[targetNode.id];
-    if (!pos) return;
+    const nodePos = layout.pos[targetNode.id];
+    if (!nodePos) return;
 
     isAutoScrollingRef.current = true;
-    const targetLeft = Math.max(0, pos.x + NODE_WIDTH / 2 - scrollContainer.clientWidth / 2);
-    const targetTop = Math.max(0, pos.y + NODE_HEIGHT / 2 - scrollContainer.clientHeight / 2);
+    const scale = isFit ? fitScale : 1;
+    const targetLeft = Math.max(0, (nodePos.x + NODE_WIDTH / 2) * scale - scrollContainer.clientWidth / 2);
+    const targetTop = isFit ? 0 : Math.max(0, (nodePos.y + NODE_HEIGHT / 2) - scrollContainer.clientHeight / 2);
 
     if (typeof scrollContainer.scrollTo === 'function') {
       scrollContainer.scrollTo({
@@ -412,9 +637,9 @@ export function App() {
       isAutoScrollingRef.current = false;
     }, 400);
     return () => clearTimeout(timeout);
-  }, [step, autoFollow, isFit, visibleNodes, layout.pos]);
+  }, [step, autoFollow, isFit, fitScale, visibleNodes, layout.pos]);
 
-  // User manual input listeners for S4 (wheel, pointerdown on canvas background, touchmove)
+  // User manual input listeners for autoFollow cancellation
   const handleCanvasWheel = () => {
     if (autoFollow) setAutoFollow(false);
   };
@@ -436,43 +661,88 @@ export function App() {
     if (autoFollow) setAutoFollow(false);
   };
 
-  const selectNode = useCallback((id: string) => {
-    setSelectedId(id);
-    const node = graph.nodes.find((n) => n.id === id);
-    if (node && node.step > step) {
-      setStep(node.step);
-    }
-  }, [graph.nodes, step]);
+  // H6: Select node and center canvas
+  const selectNode = useCallback(
+    (id: string) => {
+      setSelectedId(id);
+      const node = graph.nodes.find((n) => n.id === id);
+      if (node) {
+        if (node.step > step) {
+          setStep(node.step);
+        }
+        const scrollContainer = canvasScrollRef.current;
+        const nodePos = layout.pos[id];
+        if (scrollContainer && nodePos) {
+          const scale = isFit ? fitScale : 1;
+          const targetLeft = Math.max(0, (nodePos.x + NODE_WIDTH / 2) * scale - scrollContainer.clientWidth / 2);
+          const targetTop = isFit ? 0 : Math.max(0, (nodePos.y + NODE_HEIGHT / 2) * scale - scrollContainer.clientHeight / 2);
+          if (typeof scrollContainer.scrollTo === 'function') {
+            scrollContainer.scrollTo({
+              left: targetLeft,
+              top: targetTop,
+              behavior: 'smooth',
+            });
+          } else {
+            scrollContainer.scrollLeft = targetLeft;
+            scrollContainer.scrollTop = targetTop;
+          }
+        }
+      }
+    },
+    [graph.nodes, step, layout.pos, isFit, fitScale],
+  );
 
-  // Auto-scroll selected line in script pane (S1)
+  // H6: Active revealed node during replay & streaming
+  const activeRevealedNode = useMemo(() => {
+    if (justRevealedId) {
+      return graph.nodes.find((n) => n.id === justRevealedId);
+    }
+    if (playing || isStreaming) {
+      return visibleNodes.find((n) => n.step === step);
+    }
+    return null;
+  }, [justRevealedId, playing, isStreaming, graph.nodes, visibleNodes, step]);
+
+  // H6: Auto-scroll revealed line in script pane during replay/live runs
   useEffect(() => {
-    if (!detail?.node?.line) return;
+    const targetLine = activeRevealedNode?.line ?? detail?.node?.line;
+    const targetRound = activeRevealedNode?.round ?? detail?.node?.round ?? 1;
+    if (!targetLine) return;
     const container = scriptContainerRef.current;
     if (!container) return;
-    const lineEl = container.querySelector(`[data-line="${detail.node.line}"]`) as HTMLElement;
+    const lineEl = container.querySelector(
+      `[data-round="${targetRound}"][data-line="${targetLine}"]`,
+    ) as HTMLElement;
     if (lineEl && typeof lineEl.scrollIntoView === 'function') {
       lineEl.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
     }
-  }, [detail?.node?.line]);
+  }, [activeRevealedNode?.line, activeRevealedNode?.round, detail?.node?.line, detail?.node?.round]);
 
-  // Fit Scale (Polish L4)
-  const fitScale = useMemo(() => {
-    if (!isFit || !canvasScrollRef.current) return 1;
-    const container = canvasScrollRef.current;
-    const scaleX = (container.clientWidth - 40) / layout.totalWidth;
-    const scaleY = (container.clientHeight - 40) / layout.totalHeight;
-    const ideal = Math.min(1, scaleX, scaleY);
-    return ideal >= 0.75 ? ideal : Math.max(0.75, Math.min(1, scaleY));
-  }, [isFit, layout.totalWidth, layout.totalHeight]);
-
-  // Focus Mode & Collapsed Side Panes (Polish F4, S5)
+  // Focus Mode & Collapsed Side Panes
   const isFocusActive = focusMode && (playing || isStreaming);
   const isLeftCollapsed = isFocusActive || leftCollapsed;
   const isRightCollapsed = isFocusActive || rightCollapsed;
 
-  // Placeholder for waiting on Gemini (Polish F2)
+  // Placeholder for waiting on Gemini
   const waitingRound = (rawEvents.filter((e) => e.type === 'model_turn').length || 0) + 1;
   const isWaitingForGemini = isStreaming && liveQueueRef.current.length === 0;
+
+  // H5: Drag handle resize listener
+  const handleResizerPointerDown = (e: React.PointerEvent) => {
+    e.preventDefault();
+    const onPointerMove = (ev: PointerEvent) => {
+      const minWidth = 220;
+      const maxWidth = Math.max(220, Math.floor(window.innerWidth * 0.5));
+      const newWidth = Math.min(maxWidth, Math.max(minWidth, ev.clientX));
+      setLeftPaneWidth(newWidth);
+    };
+    const onPointerUp = () => {
+      window.removeEventListener('pointermove', onPointerMove);
+      window.removeEventListener('pointerup', onPointerUp);
+    };
+    window.addEventListener('pointermove', onPointerMove);
+    window.addEventListener('pointerup', onPointerUp);
+  };
 
   return (
     <div className="app">
@@ -567,7 +837,7 @@ export function App() {
         </div>
       </header>
 
-      {/* Toolbar (S5: Holds canvas controls without edge overlap) */}
+      {/* Toolbar */}
       <div className="toolbar">
         <div className="status">
           <i style={{ background: source === 'live' ? (isStreaming ? '#5bd38a' : '#6ca8ff') : undefined }} />
@@ -584,7 +854,7 @@ export function App() {
         </div>
 
         <div className="toolbar-right">
-          {/* Focus Toggle (Polish F4) */}
+          {/* Focus Toggle */}
           <button
             className={`tool-toggle ${focusMode ? 'active' : ''}`}
             onClick={() => setFocusMode((f) => !f)}
@@ -593,7 +863,7 @@ export function App() {
             {focusMode ? '✓ Focus on' : 'Focus'}
           </button>
 
-          {/* Show every step toggle (S1) */}
+          {/* Show every step toggle */}
           <button
             className={`tool-toggle ${userShowEveryStep ? 'active' : ''}`}
             onClick={() => setUserShowEveryStep((s) => !s)}
@@ -602,7 +872,7 @@ export function App() {
             {userShowEveryStep ? '✓ Showing intermediate values' : 'Show every step'}
           </button>
 
-          {/* Fit button (Polish L4) */}
+          {/* Fit button (H3: zoom height to fit view while scrolling horizontally) */}
           <button
             className={`tool-toggle ${isFit ? 'active' : ''}`}
             onClick={() => setIsFit((f) => !f)}
@@ -611,7 +881,7 @@ export function App() {
             {isFit ? '100%' : 'Fit'}
           </button>
 
-          {/* Follow button (S4) */}
+          {/* Follow button */}
           {!autoFollow && (
             <button
               className="tool-toggle pulse"
@@ -622,7 +892,7 @@ export function App() {
             </button>
           )}
 
-          {/* Legend Popover (Spec 8) */}
+          {/* Legend Popover */}
           <div className="legend-wrapper">
             <button
               className={`tool-toggle ${showLegend ? 'active' : ''}`}
@@ -662,10 +932,12 @@ export function App() {
       {/* Main Body */}
       <main
         style={{
-          gridTemplateColumns: `${isLeftCollapsed ? '28px' : '320px'} 1fr ${isRightCollapsed ? '28px' : 'var(--drawer-width)'}`,
+          gridTemplateColumns: `${isLeftCollapsed ? '28px' : `${leftPaneWidth}px`} 1fr ${
+            isRightCollapsed ? '28px' : 'var(--drawer-width)'
+          }`,
         }}
       >
-        {/* Left Script Pane (S1: Code lives only here; S5: Chevron inside header row) */}
+        {/* Left Script Pane (H5: code wraps with hanging indent; draggable resize handle; Round headers) */}
         {isLeftCollapsed ? (
           <aside className="script-pane collapsed-rail" title="Expand Script Pane">
             <button
@@ -707,19 +979,31 @@ export function App() {
                 .map((m) => (
                   <section className="round" key={m.id}>
                     <div className="round-title">
-                      <span>ROUND {m.round}</span>
+                      <span>Round {m.round}</span>
                       <span>MODEL TURN</span>
                     </div>
                     {m.script?.map((l: { n: number; code: string }) => {
-                      const isSelected = detail?.node?.line === l.n;
+                      const lineNodes = getNodesForLine(graph.nodes, m.round ?? 1, l.n);
+                      const hasNodes = lineNodes.length > 0;
+                      const isSelected = lineNodes.some((n) => n.id === selectedId);
+                      const isRevealed =
+                        activeRevealedNode?.line === l.n &&
+                        (activeRevealedNode?.round ?? 1) === (m.round ?? 1);
+
                       return (
                         <button
                           key={l.n}
+                          data-round={m.round}
                           data-line={l.n}
-                          className={`code-line ${isSelected ? 'selected' : ''}`}
+                          className={`code-line ${isSelected ? 'selected' : ''} ${
+                            isRevealed ? 'revealed' : ''
+                          } ${!hasNodes ? 'no-node' : ''}`}
                           onClick={() => {
-                            const target = graph.nodes.find((n) => n.line === l.n);
-                            if (target) selectNode(target.id);
+                            if (!hasNodes) return;
+                            const curIdx = lineNodes.findIndex((n) => n.id === selectedId);
+                            const targetNode =
+                              curIdx >= 0 ? lineNodes[(curIdx + 1) % lineNodes.length] : lineNodes[0];
+                            selectNode(targetNode.id);
                           }}
                           title={`Line ${l.n}`}
                         >
@@ -731,12 +1015,22 @@ export function App() {
                   </section>
                 ))}
             </div>
+
+            {/* H5: Draggable Resize Handle */}
+            <div
+              className="pane-resizer pane-resizer-left"
+              onPointerDown={handleResizerPointerDown}
+              role="separator"
+              aria-orientation="vertical"
+              aria-label="Resize script pane"
+              title="Drag to resize script pane"
+            />
           </aside>
         )}
 
         {/* Center Stage */}
         <section className="stage">
-          {/* S3: Prompt Banner above canvas (wrapping, never clipped) */}
+          {/* Prompt Banner above canvas */}
           <div className="prompt-banner">
             <span className="prompt-banner-label">You asked:</span>
             <span className="prompt-banner-text">{promptText}</span>
@@ -777,7 +1071,7 @@ export function App() {
                   transformOrigin: 'top left',
                 }}
               >
-                {/* Round Headers & Vertical Dividers (S2: Group headers say "Round N") */}
+                {/* Round Headers & Vertical Dividers (H1: Round N headers) */}
                 {roundInfo.map((r) => (
                   <div
                     key={`round-${r.round}`}
@@ -788,7 +1082,7 @@ export function App() {
                   </div>
                 ))}
 
-                {/* S3: Lane Tracks (Hide empty lanes, no YOU lane) */}
+                {/* Lane Tracks */}
                 {graph.lanes.map((lane) => {
                   const laneTop = layout.laneTopMap[lane] ?? 24;
                   const laneHeight = layout.laneHeightMap[lane] ?? 130;
@@ -818,7 +1112,7 @@ export function App() {
                   );
                 })}
 
-                {/* SVG Orthogonal Connecting Wires (Polish L2, R1) */}
+                {/* SVG Orthogonal Connecting Wires (H2: 45% opacity default, hovered at full opacity) */}
                 <svg
                   className="wires"
                   width={layout.totalWidth}
@@ -897,6 +1191,10 @@ export function App() {
                   {graph.edges
                     .filter((e) => visibleNodeIds.has(e.from) && visibleNodeIds.has(e.to))
                     .map((e, index) => {
+                      const isHovered =
+                        selectedId === null &&
+                        hoveredNodeId !== null &&
+                        (e.from === hoveredNodeId || e.to === hoveredNodeId);
                       const isLit =
                         detail !== null &&
                         detail.edges.some(
@@ -911,7 +1209,9 @@ export function App() {
                       return (
                         <g
                           key={`${e.from}-${e.to}-${index}`}
-                          className={`wire ${e.kind} ${isFaded ? 'faded' : ''} ${isLit ? 'lit' : ''}`}
+                          className={`wire ${e.kind} ${isFaded ? 'faded' : ''} ${isLit ? 'lit' : ''} ${
+                            isHovered ? 'hovered' : ''
+                          }`}
                         >
                           <path d={pathD} markerEnd={`url(#arrow-${e.kind})`} />
                           <title>{tooltipText}</title>
@@ -920,7 +1220,7 @@ export function App() {
                     })}
                 </svg>
 
-                {/* Visible Node Cards (S1, S6, S7) */}
+                {/* Visible Node Cards */}
                 <div className="node-layer">
                   {visibleNodes.map((n) => {
                     const pos = layout.pos[n.id];
@@ -938,6 +1238,8 @@ export function App() {
                           isSelected ? 'selected' : ''
                         } ${isDim ? 'dim' : ''} ${isJustRevealed ? 'just-revealed' : ''}`}
                         onClick={() => selectNode(n.id)}
+                        onMouseEnter={() => setHoveredNodeId(n.id)}
+                        onMouseLeave={() => setHoveredNodeId(null)}
                         title={`Step ${n.step}: ${n.title}`}
                       >
                         <div className="node-card-top">
@@ -950,17 +1252,17 @@ export function App() {
                         </div>
                         <strong className="node-title">{n.title}</strong>
 
-                        {/* S6: Tool call monospace signature */}
+                        {/* Tool call monospace signature */}
                         {n.callSignature && (
                           <code className="node-call-sig">{n.callSignature}</code>
                         )}
 
-                        {/* S6: Blocked reason line */}
+                        {/* Blocked reason line */}
                         {n.blockedReason && (
                           <span className="node-blocked-reason">{n.blockedReason}</span>
                         )}
 
-                        {/* S7: Untrusted reason on UNTRUSTED nodes */}
+                        {/* Untrusted reason on UNTRUSTED nodes */}
                         {n.chip === 'UNTRUSTED' && n.untrustedReason && (
                           <span className="node-untrusted-reason">{n.untrustedReason}</span>
                         )}
@@ -973,7 +1275,7 @@ export function App() {
                     );
                   })}
 
-                  {/* Pulsing Placeholder while waiting for Gemini (Polish F2) */}
+                  {/* Pulsing Placeholder while waiting for Gemini */}
                   {isWaitingForGemini && (
                     <div
                       className="node-card kind-model_turn placeholder-writing"
@@ -995,7 +1297,7 @@ export function App() {
               </div>
             </div>
           ) : (
-            /* Strace Log View (Polish R2: Colour-coded tags) */
+            /* Strace Log View */
             <div className="strace-log">
               {visibleNodes.map((n) => {
                 const isSelected = selectedId === n.id;
@@ -1019,7 +1321,7 @@ export function App() {
             </div>
           )}
 
-          {/* Replay Bar (Spec 6) */}
+          {/* Replay Bar (H4: 0.5x / 1x / 2x speed button) */}
           <div className="replay">
             <button
               className="replay-btn"
@@ -1052,10 +1354,10 @@ export function App() {
               →
             </button>
 
-            {/* Replay Speed Toggle (Spec 6) */}
+            {/* Replay Speed Toggle (H4: 0.5x / 1x / 2x) */}
             <button
               className="speed-btn"
-              onClick={() => setReplaySpeed((s) => (s === 1 ? 2 : 1))}
+              onClick={() => setReplaySpeed((s) => (s === 0.5 ? 1 : s === 1 ? 2 : 0.5))}
               title="Toggle playback speed"
             >
               {replaySpeed}x
@@ -1082,7 +1384,7 @@ export function App() {
           </div>
         </section>
 
-        {/* Right Drawer: Story OR Detail (Polish F4, S5) */}
+        {/* Right Drawer: Story OR Detail */}
         {isRightCollapsed ? (
           <aside className="drawer collapsed-rail" title="Expand Details Pane">
             <button
@@ -1135,7 +1437,7 @@ export function App() {
   );
 }
 
-// Script Code Block with Line Numbers & Truncation (Polish P1)
+// Script Code Block with Line Numbers & Truncation
 function ScriptCodeBlock({ script }: { script: Array<{ n: number; code: string }> }) {
   const [showAll, setShowAll] = useState<boolean>(false);
   const isLong = script.length > 12;
@@ -1153,23 +1455,23 @@ function ScriptCodeBlock({ script }: { script: Array<{ n: number; code: string }
       </div>
       {isLong && (
         <button
-          className="show-all-lines-btn"
-          onClick={() => setShowAll((s) => !s)}
+          className="btn-show-more-code"
+          onClick={() => setShowAll(!showAll)}
         >
-          {showAll ? 'Show fewer lines' : `Show all ${script.length} lines`}
+          {showAll ? 'Show fewer lines' : `Show all ${script.length} lines (${script.length - 12} hidden)`}
         </button>
       )}
     </div>
   );
 }
 
-// STORY Drawer when nothing is selected (Polish P1, P2, S5)
+// STORY Drawer when nothing is selected
 function StoryDrawer({
-  story: s,
+  story,
   onPick,
   onCollapse,
 }: {
-  story: ReturnType<typeof story>;
+  story: ReturnType<typeof import('./view').story>;
   onPick: (id: string) => void;
   onCollapse: () => void;
 }) {
@@ -1178,7 +1480,7 @@ function StoryDrawer({
       <div className="drawer-top">
         <div className="drawer-head-left">
           <span className="eyebrow">RUN SUMMARY</span>
-          <h2>Story</h2>
+          <h2>Execution Story</h2>
         </div>
         <div className="drawer-head-actions">
           <button
@@ -1192,32 +1494,36 @@ function StoryDrawer({
         </div>
       </div>
 
-      <div className="verdict-banner">
-        <strong>{s.headline}</strong>
+      <div className="story-headline-box">
+        <span className="story-headline-icon">🛡️</span>
+        <strong className="story-headline-text">{story.headline}</strong>
       </div>
 
-      <div className="story-sentences">
-        {s.sentences.map((sentence, idx) => (
-          <button
-            key={idx}
-            className="story-sentence-btn"
-            onClick={() => sentence.id && onPick(sentence.id)}
-            disabled={!sentence.id}
-          >
-            <p>{sentence.text}</p>
-          </button>
-        ))}
+      <div className="story-context-boundary">
+        <span className="story-context-label">CONTEXT BOUNDARY</span>
+        <p>{story.contextBoundary}</p>
       </div>
 
-      <div className="context-boundary-box">
-        <span className="eyebrow">CONTEXT BOUNDARY</span>
-        <p>{s.contextBoundary}</p>
+      <div className="story-narrative">
+        <span className="story-narrative-label">STEP-BY-STEP NARRATIVE</span>
+        <ol className="story-list">
+          {story.sentences.map((sent, idx) => (
+            <li
+              key={idx}
+              className={`story-item ${sent.id ? 'clickable' : ''}`}
+              onClick={() => sent.id && onPick(sent.id)}
+            >
+              <span>{sent.text}</span>
+              {sent.id && <span className="story-jump-chip">Inspect node →</span>}
+            </li>
+          ))}
+        </ol>
       </div>
     </aside>
   );
 }
 
-// Detail Drawer when a node is selected (Polish P1, P2, S5, S6, S7)
+// Detail Drawer when a node is selected
 function DetailDrawer({
   node,
   inspection,
@@ -1236,15 +1542,19 @@ function DetailDrawer({
   onCollapse: () => void;
 }) {
   const e = node.event;
+  const chipClass = `chip-${node.chip.toLowerCase()}`;
 
   return (
     <aside className="drawer">
       <div className="drawer-top">
         <div className="drawer-head-left">
-          <span className="eyebrow">INSPECTING {node.kind.toUpperCase().replace('_', ' ')}</span>
+          <span className="eyebrow">INSPECTING {node.kind.toUpperCase()}</span>
           <h2>{node.title}</h2>
         </div>
         <div className="drawer-head-actions">
+          <button className="close-btn" onClick={onClose} aria-label="Close details drawer">
+            ✕
+          </button>
           <button
             className="pane-header-toggle-btn"
             onClick={onCollapse}
@@ -1253,201 +1563,125 @@ function DetailDrawer({
           >
             ›
           </button>
-          <button className="close-btn" onClick={onClose} aria-label="Close details">
-            ×
-          </button>
         </div>
       </div>
 
-      {/* 1 to 3 Plain Sentences */}
-      <div className="plain-summary-box">
-        {inspection.plainSummary.map((sentence, idx) => (
-          <p key={idx} className="answer-p">
-            {sentence}
-          </p>
-        ))}
+      <div className="drawer-meta-bar">
+        <span className={`status-chip ${chipClass}`}>{node.chip}</span>
+        <span className="meta-item">
+          LANE <b>{node.lane.toUpperCase()}</b>
+        </span>
+        <span className="meta-item">
+          STEP <b>{node.step}</b>
+        </span>
+        {node.line !== undefined && (
+          <span className="meta-item">
+            LINE <b>{node.line}</b>
+          </span>
+        )}
       </div>
 
-      {/* S7: Untrusted Explanation in Detail Drawer */}
+      {/* Untrusted Explanation in Detail Drawer */}
       {node.chip === 'UNTRUSTED' && (
-        <div className="untrusted-explanation-box">
+        <section className="drawer-section untrusted-banner">
           <h3>UNTRUSTED DATA SOURCE</h3>
-          <p>
-            {node.untrustedReason ||
-              'This data comes from the public tracker, where anyone can write content.'}
+          <p className="untrusted-desc">
+            {node.untrustedReason ?? 'This node contains data influenced by an external untrusted source.'}
           </p>
           {node.hiddenInstruction && (
-            <div className="prompt-injection-warning">
+            <div className="hidden-instruction-box">
               <strong>HIDDEN INSTRUCTION DETECTED</strong>
-              <p>{node.hiddenInstruction}</p>
-              <small>External prompt content contains instructions addressed to AI assistants.</small>
+              <blockquote>{node.hiddenInstruction}</blockquote>
             </div>
           )}
-        </div>
+        </section>
       )}
 
-      {/* Repeated Calls Breakdown */}
-      {node.repeatedEvents && node.repeatedEvents.length > 1 && (
-        <div className="repeats-section">
-          <h3>REPEATED CALLS ({node.repeatedEvents.length})</h3>
-          <div className="repeats-list">
-            {node.repeatedEvents.map((ev, i) => (
-              <div key={i} className="repeat-item">
-                <span>Call {i + 1} · Step {ev.step}</span>
-                <b>{ev.ms ?? 0} ms ({ev.transport ?? 'stdio'})</b>
-              </div>
-            ))}
-          </div>
-        </div>
+      {/* Plain English Summary */}
+      <section className="drawer-section">
+        <h3>SUMMARY</h3>
+        {inspection.plainSummary.map((line, idx) => (
+          <p key={idx} className="plain-summary-line">
+            {line}
+          </p>
+        ))}
+      </section>
+
+      {/* Script block if model turn */}
+      {node.kind === 'model_turn' && e.script && (
+        <section className="drawer-section">
+          <h3>GENERATED SCRIPT</h3>
+          <ScriptCodeBlock script={e.script} />
+        </section>
       )}
 
-      {/* Traced Values List */}
-      {inspection.tracedValues.length > 0 && (
-        <div className="traced-values-section">
-          <h3>TRACED VALUES</h3>
-          <div className="traced-values-list">
-            {inspection.tracedValues.map((tv, idx) => (
-              <div key={idx} className="traced-value-item">
-                <code>
-                  {tv.name} = {tv.value}
-                </code>
-                <div className="traced-value-meta">
-                  <span>← from {tv.source}</span>
-                  <span className={`chip-demo chip-${tv.sensitivity}`}>{tv.sensitivity}</span>
-                </div>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {/* Arguments & Sources */}
+      {/* Arguments & Traced Values for Call/Blocked */}
       {(node.kind === 'call' || node.kind === 'blocked') && (
-        <>
-          <h3>
-            ARGUMENTS <span>· WHERE THEY CAME FROM</span>
-          </h3>
-          {inspection.arguments.map((a) => (
-            <div className="arg-card" key={a.name}>
-              <code>
-                {a.name} <span>= {a.preview}</span>
-              </code>
-              <div className="arg-source">
-                ←{' '}
-                {a.sources.length ? (
-                  a.sources.map((s) => (
-                    <button
-                      key={s.id}
-                      className="chip"
-                      onClick={() => onPick(s.id)}
-                      title={`Inspect ${s.title}`}
-                    >
-                      {s.title}
-                      {s.line ? ` · line ${s.line}` : ''}
-                    </button>
-                  ))
-                ) : (
-                  <span>Literal in script</span>
-                )}
-              </div>
+        <section className="drawer-section">
+          <h3>ARGUMENTS & LINEAGE</h3>
+          {inspection.arguments.length === 0 ? (
+            <p className="dim-text">No arguments provided.</p>
+          ) : (
+            <div className="args-list">
+              {inspection.arguments.map((arg) => (
+                <div key={arg.name} className="arg-box">
+                  <div className="arg-header">
+                    <span className="arg-name">{arg.name}</span>
+                    <span className="arg-preview">{arg.preview}</span>
+                  </div>
+                  <div className="arg-sources">
+                    <span className="sources-label">Sources:</span>
+                    {arg.sources.length === 0 ? (
+                      <span className="source-none">Literal in script (no tool source)</span>
+                    ) : (
+                      arg.sources.map((src) => (
+                        <button
+                          key={src.id}
+                          className={`source-chip chip-${src.chip.toLowerCase()}`}
+                          onClick={() => onPick(src.id)}
+                          title={`Inspect ${src.title}`}
+                        >
+                          {src.title}
+                        </button>
+                      ))
+                    )}
+                  </div>
+                </div>
+              ))}
             </div>
-          ))}
+          )}
 
-          <h3>POLICY DECISION</h3>
-          <div className={`policy-badge ${node.kind === 'blocked' ? 'bad' : 'ok'}`}>
-            {node.kind === 'blocked'
-              ? `Blocked · ${node.blockedReason || e.rule}`
-              : 'Allowed · forwarded to server'}
-          </div>
-
-          <div className="facts-grid">
-            <div className="fact-item">
-              <span>TRANSPORT</span>
-              <b>{e.transport ?? 'stdio'}</b>
+          {/* Blocked explanation banner */}
+          {node.kind === 'blocked' && (
+            <div className="policy-decision-box blocked">
+              <strong>Policy decision: BLOCKED</strong>
+              <p>{node.blockedReason || 'Private data would have reached a public server.'}</p>
+              <span className="policy-verdict">Not sent to external MCP server</span>
             </div>
-            <div className="fact-item">
-              <span>TIMING</span>
-              <b>{e.ms === undefined ? 'Not sent' : `${e.ms} ms`}</b>
+          )}
+          {node.kind === 'call' && (
+            <div className="policy-decision-box allowed">
+              <strong>Policy decision: ALLOWED</strong>
+              <p>All arguments cleared safety policy.</p>
+              <span className="policy-verdict">Successfully executed</span>
             </div>
-          </div>
-
-          <details>
-            <summary>Raw JSON-RPC</summary>
-            <pre>{JSON.stringify(e.rpc, null, 2)}</pre>
-          </details>
-        </>
+          )}
+        </section>
       )}
 
-      {/* Model Turn Details */}
-      {node.kind === 'model_turn' && (
-        <>
-          <details open>
-            <summary>What Gemini saw · {e.saw?.length ?? 0} items</summary>
-            <table className="saw-table">
-              <tbody>
-                {e.saw?.map((s: any, i: number) => (
-                  <tr className={`saw-row ${s.untrusted ? 'tainted' : ''}`} key={i}>
-                    <td>
-                      {s.label}
-                      {s.untrusted && <small> · untrusted</small>}
-                    </td>
-                    <td>{s.tokens} tok</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </details>
-
-          <h3>SCRIPT WRITTEN</h3>
-          <ScriptCodeBlock script={e.script ?? []} />
-        </>
-      )}
-
-      {/* Value Details */}
-      {node.kind === 'value' && (
-        <>
-          <h3>VALUE PREVIEW</h3>
-          <pre>{e.preview}</pre>
-
-          <div className="facts-grid">
-            <div className="fact-item">
-              <span>SENSITIVITY</span>
-              <b>{e.sensitivity}</b>
-            </div>
-            <div className="fact-item">
-              <span>TRUST LEVEL</span>
-              <b>{e.taint}</b>
-            </div>
-          </div>
-
-          <h3>PRODUCED FROM</h3>
-          {(e.from ?? []).map((id: string) => {
-            const sourceNode = graph.nodes.find((n) => n.id === id);
-            return (
-              <button className="related-btn" key={id} onClick={() => onPick(id)}>
-                <span>{sourceNode?.title ?? id}</span>
-                <span>→</span>
-              </button>
-            );
-          })}
-        </>
-      )}
-
-      {/* Error Details */}
-      {node.kind === 'error' && (
-        <>
-          <h3>ANALYSIS ERROR</h3>
-          <div className="alert-box">
-            <b>{e.message ?? 'Unknown lineage error'}</b>
-            <p>Line {e.line}: Static analysis could not determine lineage. Fail-closed policy was applied.</p>
-          </div>
-        </>
-      )}
+      {/* Raw Event JSON */}
+      <section className="drawer-section">
+        <h3>RAW EVENT</h3>
+        <pre className="json-block">{JSON.stringify(e, null, 2)}</pre>
+      </section>
     </aside>
   );
 }
 
-const rootEl = document.getElementById('root');
-if (rootEl) {
-  createRoot(rootEl).render(<App />);
+if (typeof document !== 'undefined') {
+  const container = document.getElementById('root');
+  if (container) {
+    const root = createRoot(container);
+    root.render(<App />);
+  }
 }

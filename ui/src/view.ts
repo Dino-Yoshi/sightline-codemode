@@ -407,96 +407,115 @@ function getNodeMetadata(
 }
 
 export function computeColumns(nodes: Node[], edges: Edge[]): Map<string, number> {
-  const nodeMap = new Map(nodes.map((n) => [n.id, n]));
-  const incomingMap = new Map<string, Edge[]>();
-  for (const n of nodes) incomingMap.set(n.id, []);
-  for (const e of edges) {
-    if (incomingMap.has(e.to)) incomingMap.get(e.to)!.push(e);
-  }
-
   const columns = new Map<string, number>();
+  if (nodes.length === 0) return columns;
 
-  // Determine rounds present
-  const rounds = Array.from(new Set(nodes.map((n) => n.round ?? 1))).sort((a, b) => a - b);
-  let globalCol = 1;
+  // 1. Group nodes into actions:
+  // An action is one model turn, or one script line's execution:
+  // its tool call and everything produced by that same line (call's result value, values derived on that line, blocked event).
+  const actionKeyMap = new Map<string, string>();
+  const actions = new Map<string, Node[]>();
 
-  for (const r of rounds) {
-    const roundNodes = nodes.filter((n) => (n.round ?? 1) === r);
-    const roundNodeIds = new Set(roundNodes.map((n) => n.id));
-    const modelNode = roundNodes.find((n) => n.kind === 'model_turn');
-
-    const localCols = new Map<string, number>();
-    const visiting = new Set<string>();
-
-    function getLocalCol(id: string): number {
-      if (localCols.has(id)) return localCols.get(id)!;
-      if (visiting.has(id)) return 1;
-      visiting.add(id);
-
-      if (modelNode && id === modelNode.id) {
-        visiting.delete(id);
-        localCols.set(id, 1);
-        return 1;
-      }
-
-      const inEdges = (incomingMap.get(id) ?? []).filter((e) => roundNodeIds.has(e.from));
-      let maxIn = 1; // start after model turn
-      for (const e of inEdges) {
-        if (e.from !== id) {
-          maxIn = Math.max(maxIn, getLocalCol(e.from));
+  for (const n of nodes) {
+    let key = '';
+    if (n.kind === 'model_turn') {
+      key = `model_${n.round ?? 1}_${n.id}`;
+    } else if (n.kind === 'call' || n.kind === 'blocked') {
+      key = `call_${n.id}`;
+    } else if (n.kind === 'value') {
+      if (n.event.op === 'result' && n.event.from?.[0]) {
+        const sourceCallId = n.event.from[0];
+        const callNode = nodes.find((x) => x.id === sourceCallId);
+        if (callNode && (callNode.round ?? 1) === (n.round ?? 1)) {
+          key = `call_${callNode.id}`;
+        } else if (n.line !== undefined) {
+          key = `line_${n.round ?? 1}_${n.step}_${n.line}`;
+        } else {
+          key = `value_${n.round ?? 1}_${n.step}_${n.id}`;
         }
+      } else if (n.line !== undefined) {
+        key = `line_${n.round ?? 1}_${n.step}_${n.line}`;
+      } else {
+        key = `value_${n.round ?? 1}_${n.step}_${n.id}`;
       }
-
-      visiting.delete(id);
-      const col = inEdges.length === 0 ? 2 : maxIn + 1;
-      localCols.set(id, col);
-      return col;
+    } else {
+      key = `event_${n.round ?? 1}_${n.step}_${n.id}`;
     }
 
-    for (const n of roundNodes) {
-      getLocalCol(n.id);
-    }
-
-    // Intra-round relaxation
-    let changed = true;
-    let iters = 0;
-    while (changed && iters < 30) {
-      changed = false;
-      iters++;
-      for (const e of edges) {
-        if (roundNodeIds.has(e.from) && roundNodeIds.has(e.to)) {
-          const cFrom = localCols.get(e.from) ?? 1;
-          const cTo = localCols.get(e.to) ?? 1;
-          if (cTo <= cFrom) {
-            localCols.set(e.to, cFrom + 1);
-            changed = true;
-          }
-        }
-      }
-    }
-
-    let maxRoundCol = 1;
-    for (const n of roundNodes) {
-      const lCol = localCols.get(n.id) ?? 1;
-      maxRoundCol = Math.max(maxRoundCol, lCol);
-      columns.set(n.id, globalCol + (lCol - 1));
-    }
-
-    globalCol += maxRoundCol;
+    actionKeyMap.set(n.id, key);
+    if (!actions.has(key)) actions.set(key, []);
+    actions.get(key)!.push(n);
   }
 
-  // Cross-round relaxation pass to guarantee strict left-to-right edges
-  let globalChanged = true;
-  let globalIters = 0;
-  while (globalChanged && globalIters < 50) {
-    globalChanged = false;
-    globalIters++;
+  // 2. Sort actions by time order (step, then event t, then original order)
+  type ActionInfo = {
+    key: string;
+    round: number;
+    step: number;
+    t: number;
+    firstIndex: number;
+    nodes: Node[];
+  };
+
+  const actionList: ActionInfo[] = [];
+  for (const [key, actNodes] of actions.entries()) {
+    const minRound = Math.min(...actNodes.map((n) => n.round ?? 1));
+    const minStep = Math.min(...actNodes.map((n) => n.step));
+    const minT = Math.min(...actNodes.map((n) => n.event.t ?? 0));
+    const firstIndex = Math.min(...actNodes.map((n) => nodes.indexOf(n)));
+    actionList.push({
+      key,
+      round: minRound,
+      step: minStep,
+      t: minT,
+      firstIndex,
+      nodes: actNodes,
+    });
+  }
+
+  actionList.sort((a, b) => {
+    if (a.round !== b.round) return a.round - b.round;
+    if (a.step !== b.step) return a.step - b.step;
+    if (a.t !== b.t) return a.t - b.t;
+    return a.firstIndex - b.firstIndex;
+  });
+
+  // 3. Assign initial columns to actions in time order
+  let col = 1;
+  const actionColMap = new Map<string, number>();
+  for (const act of actionList) {
+    actionColMap.set(act.key, col);
+    for (const n of act.nodes) {
+      columns.set(n.id, col);
+    }
+    col++;
+  }
+
+  // 4. Guarantee strict non-decreasing order for dependencies (never place a node left of what it depends on)
+  let changed = true;
+  let iters = 0;
+  while (changed && iters < 50) {
+    changed = false;
+    iters++;
     for (const e of edges) {
       const cFrom = columns.get(e.from) ?? 1;
       const cTo = columns.get(e.to) ?? 1;
-      if (cTo <= cFrom) {
-        columns.set(e.to, cFrom + 1);
-        globalChanged = true;
+      const fromKey = actionKeyMap.get(e.from);
+      const toKey = actionKeyMap.get(e.to);
+      const minRequired = fromKey === toKey ? cFrom : cFrom + 1;
+      if (cTo < minRequired) {
+        // Shift this action and all subsequent actions to maintain time ordering
+        const diff = minRequired - cTo;
+        for (const act of actionList) {
+          const actCol = actionColMap.get(act.key) ?? 1;
+          if (actCol >= cTo) {
+            actionColMap.set(act.key, actCol + diff);
+            for (const n of act.nodes) {
+              columns.set(n.id, actCol + diff);
+            }
+          }
+        }
+        changed = true;
       }
     }
   }
@@ -581,13 +600,12 @@ export function view(run: RunEvent[], options: ViewOptions = {}): View {
   }
 
   // 2. Add ONE grey "writes" edge from model turn to the first node of its round (S2)
-  // S1: Script lines are NOT nodes in ANY mode.
+  // (Will also ensure write edges connect to remaining round nodes after collapse/dedupe)
   for (const m of models) {
     if (!m.id) continue;
     const mRound = getEventRound(m);
     const roundNodes = rawNodes.filter((n) => n.round === mRound && n.id !== m.id);
     if (roundNodes.length > 0) {
-      // Find the first node of this round by step
       const sortedRoundNodes = [...roundNodes].sort((a, b) => a.step - b.step);
       const firstNode = sortedRoundNodes[0];
       addEdge(rawEdges, m.id, firstNode.id, 'write', 'writes');
@@ -813,8 +831,20 @@ export function view(run: RunEvent[], options: ViewOptions = {}): View {
   const finalNodes = rawNodes.filter((n) => !nodesToDrop.has(n.id));
   const finalNodeIds = new Set(finalNodes.map((n) => n.id));
 
+  // Remove write edges that cross rounds due to deduplication remapping
+  const filteredWorkingEdges = workingEdges.filter((e) => {
+    if (e.kind === 'write') {
+      const fromNode = rawNodes.find((n) => n.id === e.from);
+      const toNode = finalNodes.find((n) => n.id === e.to);
+      if (fromNode && toNode && fromNode.kind === 'model_turn') {
+        if ((fromNode.round ?? 1) !== (toNode.round ?? 1)) return false;
+      }
+    }
+    return true;
+  });
+
   const finalEdges: Edge[] = [];
-  for (const e of workingEdges) {
+  for (const e of filteredWorkingEdges) {
     if (
       finalNodeIds.has(e.from) &&
       finalNodeIds.has(e.to) &&
@@ -822,6 +852,20 @@ export function view(run: RunEvent[], options: ViewOptions = {}): View {
       !finalEdges.some((x) => x.from === e.from && x.to === e.to && x.kind === e.kind)
     ) {
       finalEdges.push(e);
+    }
+  }
+
+  // Ensure each model turn in finalNodes has a writes edge to the first node of its round if any exist
+  for (const m of models) {
+    if (!m.id || !finalNodeIds.has(m.id)) continue;
+    const mRound = getEventRound(m);
+    const hasWrite = finalEdges.some((e) => e.from === m.id && e.kind === 'write');
+    if (!hasWrite) {
+      const roundNodes = finalNodes.filter((n) => (n.round ?? 1) === mRound && n.id !== m.id);
+      if (roundNodes.length > 0) {
+        const sortedRoundNodes = [...roundNodes].sort((a, b) => a.step - b.step);
+        addEdge(finalEdges, m.id, sortedRoundNodes[0].id, 'write', 'writes');
+      }
     }
   }
 

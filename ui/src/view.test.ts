@@ -213,14 +213,54 @@ describe('Seam B: collapsing intermediate values and deduping repeats', () => {
     expect(trackerCalls.length).toBe(4);
   });
 
-  it('assigns deterministic layered columns such that every edge goes strictly left-to-right', () => {
+  it('H1: Assigns time-ordered columns where column order equals time order for run-a.jsonl', () => {
+    // Round 4 (H1): Graph grows horizontally in time order.
+    // One column per action, in the order actions happened.
+    const fullRunA = view(runAEvents, { showEveryStep: true });
+    
+    // Check that for any two nodes where nodeA happened before nodeB in different actions, col(A) < col(B)
+    for (let i = 0; i < fullRunA.nodes.length - 1; i++) {
+      const n1 = fullRunA.nodes[i];
+      const n2 = fullRunA.nodes[i + 1];
+      if (n1.step < n2.step) {
+        expect(n1.column!).toBeLessThanOrEqual(n2.column!);
+      }
+    }
+
+    // Every edge never places a node left of something it depends on (toCol >= fromCol)
     for (const [name, v] of [['fake', vFake], ['runA', vRunA], ['runB', vRunB]] as const) {
       const colMap = new Map(v.nodes.map((n) => [n.id, n.column ?? 1]));
       for (const e of v.edges) {
         const fromCol = colMap.get(e.from) ?? 1;
         const toCol = colMap.get(e.to) ?? 1;
-        expect(toCol, `Edge ${e.from} -> ${e.to} in ${name} must go left-to-right (${fromCol} < ${toCol})`).toBeGreaterThan(fromCol);
+        expect(
+          toCol,
+          `Edge ${e.from} -> ${e.to} in ${name} must never go left (${fromCol} <= ${toCol})`,
+        ).toBeGreaterThanOrEqual(fromCol);
       }
     }
+  });
+
+  it('H1: A call and its result share the exact same column', () => {
+    const fullRunA = view(runAEvents, { showEveryStep: true });
+    const c3 = fullRunA.nodes.find((n) => n.id === 'c3');
+    const v3 = fullRunA.nodes.find((n) => n.id === 'v3');
+    expect(c3).toBeDefined();
+    expect(v3).toBeDefined();
+    expect(c3?.column).toBe(v3?.column);
+
+    const c4 = fullRunA.nodes.find((n) => n.id === 'c4');
+    const v4 = fullRunA.nodes.find((n) => n.id === 'v4');
+    expect(c4).toBeDefined();
+    expect(v4).toBeDefined();
+    expect(c4?.column).toBe(v4?.column);
+
+    // In fake run too
+    const fullFake = view(fakeEvents, { showEveryStep: true });
+    const c1 = fullFake.nodes.find((n) => n.id === 'c1');
+    const v1 = fullFake.nodes.find((n) => n.id === 'v1');
+    expect(c1).toBeDefined();
+    expect(v1).toBeDefined();
+    expect(c1?.column).toBe(v1?.column);
   });
 });
