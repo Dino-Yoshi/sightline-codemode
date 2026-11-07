@@ -33,9 +33,21 @@ export function analyze(code: string): Analysis {
       return [n.expression.name.text, n.name.text];
     }
   };
-  const containsTools = (n: ts.Node): boolean => n.getText(file).includes('tools');
+  const declared = new Set<string>();
+  function collect(n: ts.Node): void {
+    if ((ts.isVariableDeclaration(n) || ts.isParameter(n)) && ts.isIdentifier(n.name)) declared.add(n.name.text);
+    ts.forEachChild(n, collect);
+  }
+  collect(file);
+  const globals = new Set(['JSON', 'Math', 'String', 'Number', 'Boolean', 'Array', 'Object', 'undefined', 'NaN', 'Infinity']);
+  const containsTools = (n: ts.Node): boolean => /\b(?:tools|payroll|tracker|hr)\b/.test(n.getText(file));
   function refs(n: ts.Node, locals = new Set<string>()): string[] {
-    if (ts.isIdentifier(n)) return locals.has(n.text) || n.text === 'undefined' ? [] : [n.text];
+    if (ts.isIdentifier(n)) {
+      if (locals.has(n.text) || globals.has(n.text)) return [];
+      if (declared.has(n.text)) return result.deps[n.text]?.includes('unknown') ? [n.text, 'unknown'] : [n.text];
+      error(n, `Unknown identifier ${n.text}; lineage is unknown`);
+      return ['unknown'];
+    }
     if (ts.isPropertyAccessExpression(n)) return refs(n.expression, locals);
     if (ts.isArrowFunction(n) || ts.isFunctionExpression(n)) {
       const inner = new Set(locals);
@@ -64,12 +76,18 @@ export function analyze(code: string): Analysis {
         return [site.id];
       }
       if (containsTools(n.expression)) { error(n, 'Dynamic tool call; lineage is unknown'); return ['unknown']; }
-      // Arbitrary function calls can hide data flow. Recognize common array transformations only.
-      if (!ts.isPropertyAccessExpression(n.expression) || !['reduce', 'map', 'filter', 'slice', 'join'].includes(n.expression.name.text)) {
-        error(n, 'Unsupported function call; lineage is unknown');
-        return unique(['unknown', ...n.arguments.flatMap(a => refs(a, locals))]);
+      const args = n.arguments.flatMap(a => refs(a, locals));
+      if (ts.isPropertyAccessExpression(n.expression)) {
+        const receiver = n.expression.expression;
+        const receiverRefs = refs(receiver, locals);
+        if (n.expression.name.text === 'push' && ts.isIdentifier(receiver)) {
+          result.deps[receiver.text] = unique([...(result.deps[receiver.text] ?? []), ...args]);
+        }
+        return unique([...receiverRefs, ...args]);
       }
-      return unique([...refs(n.expression.expression, locals), ...n.arguments.flatMap(a => refs(a, locals))]);
+      if (ts.isIdentifier(n.expression) && ['String', 'Number', 'Boolean'].includes(n.expression.text)) return unique(args);
+      error(n, 'Unsupported function call; lineage is unknown');
+      return unique(['unknown', ...args]);
     }
     if (ts.isPropertyAssignment(n)) return refs(n.initializer, locals);
     if (ts.isShorthandPropertyAssignment(n)) return refs(n.name, locals);
@@ -90,15 +108,26 @@ export function analyze(code: string): Analysis {
       result.deps[n.name.text] = n.initializer ? refs(n.initializer) : ['unknown'];
       return;
     }
-    if (ts.isForStatement(n) || ts.isForOfStatement(n) || ts.isForInStatement(n) || ts.isWhileStatement(n) || ts.isDoStatement(n) || ts.isIfStatement(n) || ts.isSwitchStatement(n) || ts.isTryStatement(n)) {
-      error(n, 'Control flow lineage is unknown');
-      // Any assignment in unsupported control flow is conservatively unknown.
-      function mark(child: ts.Node): void {
-        if (ts.isBinaryExpression(child) && child.operatorToken.kind >= ts.SyntaxKind.FirstAssignment && child.operatorToken.kind <= ts.SyntaxKind.LastAssignment && ts.isIdentifier(child.left)) result.deps[child.left.text] = unique([...(result.deps[child.left.text] ?? []), 'unknown']);
-        ts.forEachChild(child, mark);
+    if (ts.isForOfStatement(n) || ts.isForInStatement(n)) {
+      const dependencies = refs(n.expression);
+      if (ts.isVariableDeclarationList(n.initializer)) {
+        for (const declaration of n.initializer.declarations) {
+          if (ts.isIdentifier(declaration.name)) result.deps[declaration.name.text] = dependencies;
+          else error(declaration, 'Destructuring lineage is unknown');
+        }
+      } else if (ts.isIdentifier(n.initializer)) {
+        result.deps[n.initializer.text] = unique([...(result.deps[n.initializer.text] ?? []), ...dependencies]);
       }
-      mark(n);
-      ts.forEachChild(n, walk);
+      walk(n.statement);
+      return;
+    }
+    if (ts.isCatchClause(n)) {
+      if (n.variableDeclaration && ts.isIdentifier(n.variableDeclaration.name)) result.deps[n.variableDeclaration.name.text] = ['unknown'];
+      walk(n.block);
+      return;
+    }
+    if (ts.isReturnStatement(n)) {
+      if (n.expression) refs(n.expression);
       return;
     }
     if (ts.isExpressionStatement(n)) {
@@ -124,10 +153,9 @@ export function analyze(code: string): Analysis {
         if (ts.isIdentifier(expr.left)) {
           result.deps[expr.left.text] = unique([...(result.deps[expr.left.text] ?? []), ...dependencies]);
         } else {
-          error(expr, 'Mutation lineage is unknown');
           let target: ts.Expression = expr.left;
           while (ts.isPropertyAccessExpression(target) || ts.isElementAccessExpression(target)) target = target.expression;
-          if (ts.isIdentifier(target)) result.deps[target.text] = unique([...(result.deps[target.text] ?? []), ...dependencies, 'unknown']);
+          if (ts.isIdentifier(target)) result.deps[target.text] = unique([...(result.deps[target.text] ?? []), ...dependencies]);
         }
       } else refs(expr);
       return;
