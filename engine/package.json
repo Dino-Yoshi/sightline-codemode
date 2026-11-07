@@ -2,7 +2,23 @@
   "name": "mcpvision-engine",
   "private": true,
   "type": "module",
-  "scripts": { "test": "vitest run", "typecheck": "tsc --noEmit" },
-  "dependencies": {},
-  "devDependencies": {}
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "agent": "tsx src/agent.ts"
+  },
+  "dependencies": {
+    "@ai-sdk/google-vertex": "^5.0.134",
+    "@cloudflare/codemode": "^0.5.6",
+    "ai": "^7.0.165",
+    "dotenv": "^18.0.9",
+    "ws": "^8.22.1"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.6",
+    "@types/ws": "^8.18.2",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2",
+    "vitest": "^5.1.0"
+  }
 }
