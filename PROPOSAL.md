@@ -1,122 +1,209 @@
 # MCPVision: strace for Code Mode
 
-Zero to Demo, 2026-11-07. Track: Frontier. Gemini on Vertex. **No demo code before 11:00.**
+The single source of truth for what we're building. If something isn't here, it's out of scope.
+Zero To Demo, 2026-11-07. Track: **Frontier**. Solo builder plus agents. **Submit by 3:30 PM**
+(hard close 5:30 PM).
 
-> Code Mode lets an AI write one script that calls dozens of MCP tools at once. It's fast, but
-> you can't see what happened inside. MCPVision is strace for Code Mode, except it shows
-> **how the data moved**, not just the calls.
+## 1. What it is
 
-**The UI is the product.** Every hour of engine work exists to feed the graph.
+**Code Mode:** instead of calling tools one turn at a time, the model writes one script that calls
+many MCP tools. It's fast, but you can't see what happened inside the script.
 
-## 1. Developer goals → what the UI answers
+**MCPVision** is a Code Mode gateway that shows **how the data moved**: where every argument
+came from, where every result went, what the model saw, and what stayed hidden from it. Langfuse
+and similar tools graph *steps*. We graph *values*. Never say "first". Say "we couldn't find a
+tool that does this". Credit CaMeL for the value-tracking idea.
 
-| The developer asks | The UI answers with |
+| The developer asks | MCPVision answers with |
 |---|---|
-| "What did my agent's script actually do?" | A graph that builds live: one node per tool call, grouped by MCP server |
-| "Where did this value come from?" | Click any value: its **upstream lineage** lights up back to the tool that produced it |
-| "Where did this data end up?" | Same click: **downstream** edges light up to every call it reached |
-| "Why did that call fail or get blocked?" | A red edge, cut, with a plain-English reason in the inspector |
-| "Which line of the script did this?" | Selecting a node highlights the script line, and selecting a line highlights its nodes |
-| "Was Code Mode worth it?" | A counter of tokens and round trips, Code Mode against classic tool calling |
-| "Just give me the raw log" | An **strace view** toggle that shows the flat, ordered call log, synced with the graph |
+| What did my agent's script actually do? | A lane graph that builds live, step by step |
+| Where did this value come from, and where did it go? | Click it: the path lights up, and the edges show the real values |
+| Why was this call blocked? | A red dashed edge, plus a plain-English reason in the drawer |
+| Which line of the script did this? | The script pane and the graph highlight each other |
+| What did the model actually see? | The context boundary: model tokens vs. sandbox-only tokens |
+| Just give me the log | The strace toggle shows the same run as a flat list |
 
-## 2. Screen layout
+## 2. Screen (structure locked, look NOT locked)
 
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│  Task: "Summarize open issues and post payroll totals to HR"   [Run] [⟲]    │
-├──────────────┬──────────────────────────────────────────┬───────────────────┤
-│ SCRIPT       │  GRAPH (React Flow)                      │ INSPECTOR         │
-│ (generated)  │   ┌payroll (local)┐     ┌tracker (remote)┐│ value: "$182,400" │
-│ 1 issues=…   │   │ get_salaries ●──────╳ post_comment   ││ from: payroll.    │
-│ 2 pay=…  ◄───┼── │               \     │ list_issues ●  ││   get_salaries    │
-│ 3 total=…    │   └────────────────\────└───────│────────┘│ via: sum() L3     │
-│ 4 post(…)    │                     ●─ hr.post_summary   ││ BLOCKED: private  │
-│              │                                          ││ payroll → public  │
-├──────────────┴──────────────────────────────────────────┴───────────────────┤
-│ ▶ timeline scrubber ──●─────────────  │ Code Mode: 1 trip, 2.1k tok vs 9 / 14k │
-└─────────────────────────────────────────────────────────────────────────────┘
-```
+The structure comes from `design/mockups/hybrid.html`. **Don't copy its look.** It's cluttered.
 
-**Visual language (decide once, keep consistent):**
-- **Nodes:** tool calls are cards with the server's color and a `local`/`remote` badge. Values
-  are small chips that are **collapsed into edges by default** and expand on click, so the graph
-  doesn't turn into a hairball.
-- **Edges:** solid lines are data flow and dashed lines are control dependence ("this `if`
-  depended on X"). The edge label is a preview of the value.
-- **Color = sensitivity:** neutral for public, amber for private, red for a flow that broke policy.
-- **Motion:** nodes appear in execution order (that's the strace feel), and edges animate once
-  when data passes through them. The scrubber replays any run.
-- **Dark theme first.** It's projected on stage.
+- **Top bar:** the task, Run, and a Graph/strace toggle.
+- **Left: script pane.** The code Gemini wrote, grouped by round. Clicking a line selects its
+  node.
+- **Center: lane canvas.** Rows top to bottom: YOU, MODEL, SCRIPT, then one row per MCP server.
+  Left to right is time (rounds).
+  - The canvas must make clear that the model never calls tools. The model writes code, and the
+    code calls tools.
+  - Edges: asks/writes (grey), code calls a tool (blue), public data (slate), private data
+    (amber), influenced by untrusted text (pink dashed), blocked (red dashed).
+  - Context boundary: the MODEL lane is tinted and shows a token count. A note under it gives the
+    sandbox-only tokens.
+- **Right: detail drawer.** It opens when you click a node. It has a different variant for each
+  node type:
+  - **Tool call:** each argument and *where it came from* (clickable), the policy decision,
+    timing, transport, and the raw JSON-RPC.
+  - **Model turn:** what the model saw (tokens, with untrusted parts highlighted) and the script
+    it wrote.
+  - **Script line:** the code, the values it read, and the calls it made.
+- **Bottom: replay bar.** Shows the step ticks. Step through with ←/→.
+- **Trace modes:** *Lineage* lights everything upstream and downstream of the selection. *Blast
+  radius* lights only downstream.
+
+**UX rules (the fix for the clutter):**
+1. When nothing is selected, show only the lanes, the nodes and the edges, with no edge labels.
+   Show labels only along a traced path, and there they show the real values.
+2. The drawer opens with one-sentence answers, such as "From payroll.get_salaries via line 7".
+   The raw JSON-RPC and the token tables start collapsed.
+3. Use one row of controls. The legend starts collapsed.
+4. Dark theme first, because it's projected on stage.
 
 ## 3. How it works
 
+**DECIDED (11:40): we use the REAL Code Mode, Cloudflare's `codemode` (TypeScript), driven by
+Gemini.** We don't run our own interpreter. MCPVision *watches* real Code Mode from outside.
+
 ```
-task ─► Gemini (planner) ─► Python-subset script ─► OUR INTERPRETER ─► MCP servers
-                                                       │  every value carries
-                                                       │  {id, source, sensitivity}
-                                                       ▼
-                                             trace events (JSONL) ─► WebSocket ─► UI
-```
-
-- **Interpreter:** a Python `ast` whitelist (assign, literals, f-strings, arithmetic,
-  comparisons, `if`, `for`, `len`/`sum`/`sorted`, and tool calls). It never calls `exec`. Each
-  value has an id, and each operation records which value ids went in. That record is the graph.
-- **MCP:** two fixture servers using the Python `mcp` SDK. `payroll` (private) runs locally over
-  stdio. `tracker` (public, with one poisoned issue) runs over HTTP to stand in for a remote
-  server. If it costs time, run both locally.
-- **Policy:** the only rule is that a value with private lineage can't reach a public sink.
-  When it tries, emit a `blocked` event. The graph is the point and the block is one thing it
-  shows.
-- **Efficiency counter:** run the same task through a classic tool-calling loop and count
-  round trips and tokens. Record the result once, then display it.
-
-### Trace event contract (agree on this first so UI and engine build in parallel)
-
-```json
-{"t": 12, "type": "call",    "id": "c3", "server": "payroll", "tool": "get_salaries", "line": 2, "args": ["v1"], "remote": false}
-{"t": 13, "type": "value",   "id": "v4", "from": ["c3"], "op": "result", "preview": "[…12 rows]", "sensitivity": "private"}
-{"t": 14, "type": "value",   "id": "v5", "from": ["v4"], "op": "sum", "line": 3, "preview": "$182,400", "sensitivity": "private"}
-{"t": 15, "type": "blocked", "id": "c4", "server": "tracker", "tool": "post_comment", "line": 4, "args": ["v5"], "reason": "Payroll data (private) can't go to the public tracker."}
-{"t": 16, "type": "summary", "codemode": {"trips": 1, "tokens": 2100}, "classic": {"trips": 9, "tokens": 14000}}
+task ─► Gemini (Vertex, via AI SDK) ─► real Cloudflare Code Mode writes TS ─► sandbox runs it
+                                                     │ every tool call goes through OUR wrapper
+                                                     ├─► policy check ─► MCP servers (payroll · tracker · hr)
+                                                     └─► run events (JSONL) ─► WebSocket ─► UI
+lineage = static data-flow over the real generated TS (TypeScript compiler API)
+        + the actual argument and result values seen at the wrapper
 ```
 
-## 4. Build plan (UI-first, two tracks in parallel)
+- **Engine:** a Node and TypeScript project. Gemini goes through the AI SDK's Google Vertex
+  provider, using the **stronger Flash model** (`GEMINI_MODEL`), never Flash-Lite. The agent loop
+  is ours, so we can see the prompt and every model turn.
+- **Code Mode spike (first 30 min, decides the runtime):** get Cloudflare's `codemode` running
+  locally with Gemini and the three fixture MCP servers.
+  - **Fallback if it isn't running by 12:30:** keep Code Mode's real code generation, but run
+    the generated code in Node `vm` with the same tool wrapper. Say this on stage.
+- **Tool wrapper (the observer):** every MCP tool that Code Mode can call is wrapped. Each call
+  emits `call` and `value` events with the real arguments, results, timing and JSON-RPC. The
+  policy runs **before** the call is forwarded.
+- **Lineage:** parse the generated TS and trace data flow between variables (`total = sum(pay)`
+  means `total` comes from `pay`, which comes from `payroll.get_salaries`). Map each call site in
+  the code to the wrapper call that happened at runtime, by order and tool name.
+  - Code the analyzer can't follow produces an `error` or "unknown lineage" node, never a crash.
+  - **Unknown lineage counts as private if any private value could have reached it**
+    (fail-closed).
+- **Context boundary:** what Code Mode returns to the model, counted in tokens, compared with
+  everything the tools returned.
+- **Fixture servers** (TypeScript MCP SDK, so the whole engine uses one language):
+  - `payroll`: local, stdio, private.
+  - `tracker`: HTTP, public and untrusted. Issue #42 hides an instruction aimed at AI
+    assistants.
+  - `hr`: local, stdio, HR-only sink.
 
-| Block | UI track (priority) | Engine track |
+### Policy: one rule
+
+A value with **private** lineage can't reach a **public** sink. When it tries, the call is
+**not sent**, and a `blocked` event is emitted with a reason.
+
+Taint (influenced by untrusted text) is shown in **pink** and named in the block reason, but it
+**never blocks a call on its own**.
+
+### Run format (JSONL, one event per line)
+
+The canonical example is `runs/fake-run.jsonl`. The UI is built against it.
+
+| type | key fields | lane |
 |---|---|---|
-| 0:00–0:30 | Scaffold Vite + React + `@xyflow/react` + ELK layout; **hand-write `fake-trace.jsonl`** | `uv` project; check **Langfuse agent-graph view** (a novelty risk, 15 min) |
-| 0:30–2:30 | Graph from fake trace: nodes, server groups, edges, colors, appear-in-order | Interpreter + value ids + lineage events; unit tests |
-| 2:30–4:00 | Inspector + lineage highlight + script-line sync | MCP fixture servers; the interpreter calls them for real |
-| 4:00–5:00 | Scrubber, strace toggle, efficiency counter | Gemini planner writes the script; WebSocket streams events |
-| 5:00–6:30 | **Connect to live events.** Polish: motion, spacing, empty and error states | Poisoned issue → blocked event; record 3 good runs as JSONL |
-| 6:30–end | Recorded-mode toggle, rehearse 3×, README, **submit early** | — |
+| `prompt` | `id, text, tokens` | YOU |
+| `model_turn` | `id, round, saw:[{label, ref?, tokens, untrusted}], script:[{n, code}], influenced_by:[ids]` | MODEL |
+| `call` | `id, server, tool, line, transport, args:{name:{preview, from:[ids]}}, rpc, ms` | server lane |
+| `value` | `id, from:[ids], op, line, preview, tokens, sensitivity, taint, in_model_context` | SCRIPT (or server lane for `op:"result"`) |
+| `blocked` | like `call`, plus `rule, reason`, no `ms` | server lane, red |
+| `error` | `line, message` | SCRIPT, as an error node |
+| `summary` | `model_tokens, sandbox_tokens, rounds` | footer |
 
-**Never cut:** the live graph, click-for-lineage, the red cut edge, and the script-line sync.
-**Cut in this order:** remote transport → efficiency counter (show a slide instead) → scrubber →
-`for` loops in the interpreter.
+Every event has `t` (ms since start) and `step` (the replay tick). `sensitivity` is
+`public|private`. `taint` is `trusted|untrusted`. These are separate axes: issue #42 is public
+*and* untrusted.
 
-## 5. Risks, checked against ourselves
+## 4. Demo (about 3 minutes, two recorded runs as a fallback)
 
-- **"Langfuse/LangSmith/Phoenix already do this."** Checked: Langfuse agent graphs (ELK layout, aggregated/expanded modes) draw *steps* (observations). We draw
-  *values* and how they connect inside one Code Mode script. Verify in the first 30 minutes. If
-  Langfuse shows value lineage, change the claim before building.
-- **"Real Code Mode is TypeScript."** True. We use a Python subset because that's what lets us
-  trace every value in 10 hours. Anthropic's programmatic tool calling runs Python. Say it out
-  loud.
-- **Hairball graph.** Collapse values into edges by default and keep demo scripts to about 10
-  lines.
-- **Gemini writes an unsupported script.** Show "unsupported construct at line N" as a node,
-  never a crash. Recorded mode covers the demo.
-- **Novelty claim:** "We couldn't find a tool that shows data flow inside Code Mode." Never say
-  "first". Credit CaMeL for the value-tracking idea.
+1. "Code Mode: one script, dozens of tool calls, and it's a black box."
+2. **Run A: "Triage issues, send payroll total to HR."** The graph builds live. Click the payroll
+   total, and its lineage lights back to `payroll.get_salaries`. Show the context boundary: 214
+   private rows, 0 tokens to the model. Issue #42 reached the model's context. **If Flash ignored
+   it, the graph proves that it did.**
+3. **Run B: the honest mistake. "Post the October payroll total on issue #42 and send it to
+   HR."** The red edge is cut. The drawer says: private → public, blocked before it was sent.
+   This protection doesn't depend on the model behaving.
+4. Toggle strace: "This is what you had before."
+5. Honest limits: lineage is worked out from the real generated code (static analysis, which is
+   fail-closed when unsure), and we use our own agent loop.
 
-## 6. The 3-minute demo
+## 5. Tests: two seams
 
-1. (30s) "Code Mode is taking off: one script, dozens of tool calls. But it's a black box."
-2. (60s) Run it. The graph builds live, strace-style. Click the salary total and its lineage
-   lights up back to `payroll.get_salaries`.
-3. (40s) The poisoned issue: one red edge appears and is cut. The inspector explains why, and
-   the script line highlights.
-4. (30s) Toggle the strace view to show the same run as a flat log. "This is what you had before."
-5. (20s) The efficiency counter, then credits and the honest limits.
+- **Seam A, observed Code Mode execution:** give the engine a *fixed generated script* (TS text,
+  so no LLM is involved) plus the real fixture MCP servers. Each test asserts on what goes back to
+  the model *and* on the recorded run. Required cases:
+  - `total` has private lineage back to `get_salaries`.
+  - A private → public call is blocked, and the tracker fixture **received nothing**.
+  - Code the analyzer can't follow produces an `error` or unknown-lineage node, is fail-closed,
+    and doesn't crash.
+  - Payroll rows never appear in what goes back to the model.
+- **Seam B, the run turned into the screen (pure functions, no DOM):** `view(run)` builds lanes,
+  nodes, edges and steps. `inspect(view, id, mode)` returns the lit set, the edge labels and the
+  drawer content. Required cases:
+  - Lineage and blast radius light the right sets.
+  - The drawer shows each argument's source.
+  - Stepping hides later nodes.
+  - An error event renders as an error node.
+- The Gemini planner is **not** a test seam. Cover it with recorded runs and rehearsal.
+
+## 6. Scope and cuts
+
+**Must ship:** the lane graph, click to trace, the drawer (the tool-call variant at minimum), the
+red blocked edge, the context boundary, and script-line sync.
+
+**Drop in this order:**
+1. HTTP transport (run everything on stdio)
+2. What-if replay
+3. The efficiency counter
+4. Blast radius
+5. The replay bar
+6. The strace toggle
+7. The model-turn and script-line drawer variants
+8. Lineage through loops (mark it unknown and fail closed instead)
+
+**Out of scope:** our own interpreter, Anthropic programmatic tool calling, gateway-only mode
+without our agent loop, auth, persistence, and more than three fixture servers.
+
+**Stretch (after 3:00, only if the core is done):** Firecrawl as a real remote, untrusted MCP
+source.
+
+## 7. Repo layout and ownership (one worktree and branch per agent)
+
+| Path | Owner | Contents |
+|---|---|---|
+| `ui/` | Antigravity agent 1 | Vite + React + TypeScript. Seam B functions plus their tests |
+| `engine/src/lineage.ts`, `policy.ts` | Codex | Static lineage over the generated TS, and the policy, with unit tests |
+| `engine/src/observer.ts`, `engine/fixtures/` | Kiro | Tool wrapper, fixture MCP servers, seam A tests |
+| `engine/src/agent.ts` | Antigravity agent 2 | Code Mode spike, the Gemini loop, the two demo tasks, the WebSocket |
+| `runs/` | shared | `fake-run.jsonl` and the recorded demo runs |
+
+`engine/` is a single Node and TypeScript project (pnpm).
+
+**Interfaces** (agree on these, then build them in parallel):
+
+```ts
+// Codex: lineage.ts. Pure, with no I/O.
+analyze(code: string): { sites: CallSite[]; deps: Record<string /*var*/, string[] /*vars or site ids*/>; errors: {line:number; message:string}[] }
+// Codex: policy.ts. Pure.
+check(argLineage: Lineage, sink: ServerPolicy): { allow: true } | { allow: false; rule: string; reason: string }
+// Kiro: observer.ts. Wraps the MCP tools that Code Mode calls.
+wrapTools(clients: McpClients, servers: Record<string, ServerPolicy>, analysis: Analysis, emit: (e: RunEvent) => void): CodeModeTools
+type ServerPolicy = { source: "public"|"private"; sink: "public"|"private"; taint: "trusted"|"untrusted" }
+```
+
+## 8. Risks
+
+- **Langfuse might already show value lineage.** As far as we checked, it graphs observations
+  (steps). If anyone finds value lineage there, change the claim.
+- **Gemini writes code outside the subset.** It becomes an `error` node, never a crash. Recorded
+  runs cover the demo.
+- **Hairball graph.** Keep the scripts to about 10 lines, and show no labels until something is
+  selected.
