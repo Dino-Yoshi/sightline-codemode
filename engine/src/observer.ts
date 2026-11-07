@@ -147,6 +147,63 @@ export function wrapTools(
     return result;
   };
 
+  /**
+   * Walk the lineage back to the call sites and collect the names of the private
+   * sources (`server.tool`) that reached these refs. Used to name the source in
+   * the block reason, e.g. "payroll.get_salaries". Order-preserving, de-duped.
+   */
+  const resolvePrivateSources = (refs: string[]): string[] => {
+    const names: string[] = [];
+    const seen = new Set<string>();
+    const visit = (ref: string) => {
+      if (ref === 'unknown' || seen.has(ref)) return;
+      seen.add(ref);
+      const site = analysis.sites.find((s) => s.id === ref);
+      if (site) {
+        if ((servers[site.server]?.source ?? 'private') === 'private') {
+          const name = `${site.server}.${site.tool}`;
+          if (!names.includes(name)) names.push(name);
+        }
+        return;
+      }
+      const deps = analysis.deps[ref];
+      if (deps) for (const d of deps) visit(d);
+    };
+    for (const r of refs) visit(r);
+    return names;
+  };
+
+  /** True if any value with untrusted taint is really in this lineage. */
+  const resolveHasUntrusted = (refs: string[]): boolean => {    const seen = new Set<string>();
+    const visit = (ref: string): boolean => {
+      if (ref === 'unknown' || seen.has(ref)) return false;
+      seen.add(ref);
+      const site = analysis.sites.find((s) => s.id === ref);
+      if (site) return (servers[site.server]?.taint ?? 'trusted') === 'untrusted';
+      const deps = analysis.deps[ref];
+      if (!deps) return false;
+      return deps.some(visit);
+    };
+    return refs.some(visit);
+  };
+
+  /**
+   * Pick a human-readable subject for the block reason: the named variable that
+   * carries the private value (e.g. `total`), rather than the argument key the
+   * script happened to use (e.g. `body`). Returns undefined if no such variable
+   * is found, so the caller can fall back to the argument name.
+   */
+  const pickSubject = (refs: string[]): string | undefined => {
+    const isPrivateVar = (ref: string): boolean => {
+      if (ref === 'unknown') return false;
+      // A variable (not a call site) whose resolved lineage is private.
+      if (analysis.sites.some((s) => s.id === ref)) return false;
+      if (!(ref in analysis.deps)) return false;
+      return resolveSensitivity([ref]) === 'private';
+    };
+    return refs.find(isPrivateVar);
+  };
+
   let step = options?.step ?? 0;
   const start = options?.start ?? Date.now();
 
@@ -156,25 +213,55 @@ export function wrapTools(
       const key = `${server}.${tool}`;
       const idx = used[key] ?? 0;
       used[key] = idx + 1;
-      const site = sitesFor(server, tool)[idx];
+      // BUG 1 fix: a (server, tool) call can have more runtime calls than static
+      // sites (e.g. one post_comment site inside a for-of loop that runs many
+      // times). Map any extra runtime call to the LAST static site matched for
+      // that (server, tool), so a site inside a loop covers every iteration
+      // instead of falling through to unknown lineage and a false block.
+      const toolSites = sitesFor(server, tool);
+      const site = toolSites[idx] ?? toolSites[toolSites.length - 1];
       const line = site?.line ?? 0;
 
       // Build per-argument lineage previews and compute the worst sensitivity.
       const argEvents: Record<string, { preview: string; from: string[] }> = {};
       let worst: Lineage['sensitivity'] = site ? 'public' : 'unknown';
       const allFrom: string[] = [];
+      // Track which argument and sources drive the block, to name them in the reason.
+      let blockingArg: string | undefined;
+      let blockingRefs: string[] = [];
       for (const [name, value] of Object.entries(args)) {
         const rawFrom = site?.args[name] ?? [];
         const from = resolveFromIds(rawFrom);
         argEvents[name] = { preview: preview(value), from };
         allFrom.push(...rawFrom);
         const s = resolveSensitivity(rawFrom);
-        if (s === 'unknown') worst = 'unknown';
-        else if (s === 'private' && worst !== 'unknown') worst = 'private';
+        if (s === 'unknown') {
+          worst = 'unknown';
+          if (!blockingArg) {
+            blockingArg = name;
+            blockingRefs = rawFrom;
+          }
+        } else if (s === 'private') {
+          if (worst !== 'unknown') worst = 'private';
+          // Prefer a concrete private arg as the one named in the reason.
+          if (!blockingArg || !blockingRefs.length) {
+            blockingArg = name;
+            blockingRefs = rawFrom;
+          }
+        }
       }
 
       const lineage: Lineage = { sensitivity: worst, taint: policy.taint };
-      const decision = check(lineage, policy);
+      // Name the value that carries the blocking lineage. Prefer the variable
+      // the argument reads (e.g. `total`) over the argument key (e.g. `body`),
+      // so the reason reads "total comes from payroll.get_salaries (private)…".
+      const subject = pickSubject(blockingRefs) ?? blockingArg;
+      const decision = check(lineage, policy, {
+        argName: subject,
+        sinkServer: server,
+        sources: resolvePrivateSources(blockingRefs),
+        untrusted: resolveHasUntrusted(blockingRefs),
+      });
       const rpc = {
         jsonrpc: '2.0',
         id: step + 1,

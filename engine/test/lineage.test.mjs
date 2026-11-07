@@ -126,8 +126,12 @@ test('run B round 3 blocks the comment and traces its body to the payroll result
   const blocked = events.find(e => e.type === 'blocked');
   assert.equal(sent, false);
   assert.deepEqual(blocked.args.body.from, [payroll.id]);
-  assert.match(blocked.reason, /Private lineage/);
-  assert.doesNotMatch(blocked.reason, /Unknown/);
+  // New one-sentence reason names the private source and the public sink.
+  assert.match(blocked.reason, /comes from payroll\.get_salaries \(private\)/);
+  assert.match(blocked.reason, /tracker is public/);
+  assert.match(blocked.reason, /so the call was blocked before it was sent\.$/);
+  // The payroll total is trusted, so untrusted text is NOT mentioned.
+  assert.doesNotMatch(blocked.reason, /untrusted/);
 });
 
 test('finds tool calls returned directly from a wrapper', () => {

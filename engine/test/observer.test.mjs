@@ -112,6 +112,18 @@ test('private -> public call is blocked and the tracker received nothing', async
   assert.ok(blocked, 'a blocked event was emitted for the tracker');
   assert.equal(blocked.rule, 'private-to-public');
 
+  // BUG 2: the reason is one plain sentence naming the private source and sink.
+  assert.equal(
+    blocked.reason,
+    'total comes from payroll.get_salaries (private) and tracker is public, so the call was blocked before it was sent.',
+  );
+  // The salary values are trusted, so untrusted text is NOT mentioned.
+  assert.doesNotMatch(blocked.reason, /untrusted/);
+
+  // BUG 2: the blocked event's args[*].from lists the value ids, as allowed calls do.
+  const payrollResult = events.find((e) => e.type === 'value' && e.op === 'result');
+  assert.deepEqual(blocked.args.body.from, [payrollResult.id]);
+
   // The tracker fixture received NOTHING (the core done-when assertion).
   const trackerLog = await logOf(tracker);
   assert.deepEqual(trackerLog, []);
@@ -165,4 +177,130 @@ test('payroll rows never appear in what goes back to the model', async () => {
   );
   assert.ok(payrollResult);
   assert.equal(payrollResult.in_model_context, false);
+});
+
+// --- BUG 1: a tool call site inside a loop must cover every iteration. --------
+
+test('a post_comment call site inside a loop covers every iteration (no false block)', async () => {
+  // One static site for tracker.post_comment, but many runtime calls (one per
+  // open issue). All posted data is public (from tracker.list_issues), so every
+  // iteration must be allowed and the tracker must receive all of them.
+  const code = [
+    'const openIssues = await tracker.list_issues({ state: "open" });',
+    'const triaged = [];',
+    'for (const issue of openIssues) {',
+    '  const comment = `Triaged #${issue.id} ${issue.title}`;',
+    '  await tracker.post_comment({ issue: issue.id, body: comment });',
+    '  triaged.push({ id: issue.id });',
+    '}',
+  ].join('\n');
+  const analysis = analyze(code);
+
+  // Only ONE static post_comment site exists for the whole loop.
+  const postSites = analysis.sites.filter((s) => s.server === 'tracker' && s.tool === 'post_comment');
+  assert.equal(postSites.length, 1);
+
+  const events = [];
+  const tools = wrapTools(clients, SERVERS, analysis, (e) => events.push(e));
+
+  const issuesRes = await tools.tracker.list_issues({ state: 'open' });
+  const issues = JSON.parse(issuesRes.content[0].text);
+  assert.ok(issues.length > 1, 'the fixture lists more than one issue');
+
+  for (const issue of issues) {
+    const res = await tools.tracker.post_comment({
+      issue: issue.id,
+      body: `Triaged #${issue.id} ${issue.title}`,
+    });
+    // Public -> public: never blocked, on any iteration.
+    assert.notEqual(res?.blocked, true, `issue #${issue.id} must not be blocked`);
+  }
+
+  // No blocked events at all, and every comment actually reached the tracker.
+  assert.equal(events.filter((e) => e.type === 'blocked').length, 0);
+  const trackerLog = await logOf(tracker);
+  // Tracker state persists across tests, so assert THESE comments all arrived.
+  for (const issue of issues) {
+    const body = `Triaged #${issue.id} ${issue.title}`;
+    assert.ok(
+      trackerLog.some((c) => c.tool === 'post_comment' && c.args.body === body),
+      `tracker received the comment for issue #${issue.id}`,
+    );
+  }
+  // Extra runtime calls still carry a real line number (mapped to the loop site).
+  const callEvents = events.filter((e) => e.type === 'call' && e.tool === 'post_comment');
+  assert.equal(callEvents.length, issues.length);
+  assert.ok(callEvents.every((e) => e.line === postSites[0].line));
+});
+
+test('a loop site still blocks when the posted data is private (fix does not weaken policy)', async () => {
+  // The same loop shape, but the body carries a private payroll total. Every
+  // iteration, including the extra ones mapped to the loop site, must be blocked.
+  const code = [
+    'const pay = await payroll.get_salaries({ month: "2026-10" });',
+    'const total = pay.reduce((s, r) => s + r.gross, 0);',
+    'const openIssues = await tracker.list_issues({ state: "open" });',
+    'for (const issue of openIssues) {',
+    '  await tracker.post_comment({ issue: issue.id, body: `total ${total}` });',
+    '}',
+  ].join('\n');
+  const analysis = analyze(code);
+  const events = [];
+  const tools = wrapTools(clients, SERVERS, analysis, (e) => events.push(e));
+
+  await tools.payroll.get_salaries({ month: '2026-10' });
+  const issuesRes = await tools.tracker.list_issues({ state: 'open' });
+  const issues = JSON.parse(issuesRes.content[0].text);
+
+  for (const issue of issues) {
+    const res = await tools.tracker.post_comment({ issue: issue.id, body: 'total 1699983' });
+    assert.equal(res.blocked, true);
+  }
+
+  const blocked = events.filter((e) => e.type === 'blocked');
+  assert.equal(blocked.length, issues.length);
+  // Every block names the private source and the public sink.
+  for (const b of blocked) {
+    assert.equal(
+      b.reason,
+      'total comes from payroll.get_salaries (private) and tracker is public, so the call was blocked before it was sent.',
+    );
+  }
+  const trackerLog = await logOf(tracker);
+  // The tracker fixture state persists across tests, so assert on THIS body:
+  // none of the private payroll comments may have arrived.
+  assert.equal(trackerLog.filter((c) => c.tool === 'post_comment' && c.args.body === 'total 1699983').length, 0);
+});
+
+// --- BUG 2: the reason mentions untrusted text only when it is truly present. -
+
+test('the block reason mentions untrusted text only when an untrusted value is in the lineage', async () => {
+  // The body mixes a private payroll total with untrusted tracker text, so the
+  // reason must name both the private source and the untrusted influence.
+  const code = [
+    'const pay = await payroll.get_salaries({ month: "2026-10" });',
+    'const total = pay.reduce((s, r) => s + r.gross, 0);',
+    'const issues = await tracker.list_issues({ state: "open" });',
+    'const title = issues[0].title;',
+    'await tracker.post_comment({ issue: 42, body: `${title}: ${total}` });',
+  ].join('\n');
+  const analysis = analyze(code);
+  const events = [];
+  const tools = wrapTools(clients, SERVERS, analysis, (e) => events.push(e));
+
+  await tools.payroll.get_salaries({ month: '2026-10' });
+  await tools.tracker.list_issues({ state: 'open' });
+  const res = await tools.tracker.post_comment({ issue: 42, body: 'Login timeout: 1699983' });
+  assert.equal(res.blocked, true);
+
+  const blocked = events.find((e) => e.type === 'blocked' && e.server === 'tracker');
+  assert.match(blocked.reason, /payroll\.get_salaries \(private\)/);
+  assert.match(blocked.reason, /untrusted/);
+  assert.match(blocked.reason, /tracker is public/);
+  // Still one plain sentence ending with the blocked-before-sent clause.
+  assert.match(blocked.reason, /so the call was blocked before it was sent\.$/);
+
+  // args[*].from lists value ids for the blocked call too.
+  const payrollResult = events.find((e) => e.type === 'value' && e.op === 'result' && e.sensitivity === 'private');
+  assert.ok(blocked.args.body.from.includes(payrollResult.id));
 });

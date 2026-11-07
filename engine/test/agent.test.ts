@@ -80,7 +80,9 @@ describe('createFixtureObserver & Policy', () => {
     expect(blockedEvents[0].server).toBe('tracker');
     expect(blockedEvents[0].tool).toBe('post_comment');
     expect(blockedEvents[0].rule).toBe('private-to-public');
-    expect(blockedEvents[0].reason).toContain('Private lineage');
+    expect(blockedEvents[0].reason).toContain('comes from payroll.get_salaries (private)');
+    expect(blockedEvents[0].reason).toContain('tracker is public');
+    expect(blockedEvents[0].reason).toContain('so the call was blocked before it was sent.');
   });
 });
 
