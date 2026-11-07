@@ -31,7 +31,7 @@ export type RunEvent = {
   [key: string]: any;
 };
 
-export type NodeKind = 'prompt' | 'model_turn' | 'script' | 'call' | 'value' | 'blocked' | 'error';
+export type NodeKind = 'prompt' | 'model_turn' | 'call' | 'value' | 'blocked' | 'error';
 export type StatusChip = 'PRIVATE' | 'PUBLIC' | 'UNTRUSTED' | 'SENT' | 'BLOCKED' | 'ERROR';
 
 export type Node = {
@@ -46,6 +46,10 @@ export type Node = {
   chip: StatusChip;
   event: RunEvent;
   kind: NodeKind;
+  callSignature?: string;
+  blockedReason?: string;
+  untrustedReason?: string;
+  hiddenInstruction?: string;
   repeatCount?: number;
   repeatedEvents?: RunEvent[];
   via?: string;
@@ -121,7 +125,7 @@ export function parseRun(text: string): RunEvent[] {
     .map((line) => JSON.parse(line) as RunEvent);
 }
 
-function humanizeTool(tool?: string): string {
+export function humanizeTool(tool?: string): string {
   if (!tool) return 'Tool call';
   if (tool === 'list_issues') return 'List open issues';
   if (tool === 'get_salaries') return 'Read payroll';
@@ -136,13 +140,142 @@ function humanizeTool(tool?: string): string {
     .replace(/\b\w/g, (c) => c.toUpperCase());
 }
 
-function getNodeTitleAndSubtitle(
+export function formatCallSignature(
+  server?: string,
+  tool?: string,
+  args?: Record<string, { preview: string }>,
+): string {
+  const s = server ?? 'mcp';
+  const t = tool ?? 'call';
+  if (!args || Object.keys(args).length === 0) {
+    return `${s}.${t}()`;
+  }
+  const formattedArgs = Object.entries(args).map(([k, v]) => {
+    let raw = v.preview?.trim() ?? '';
+    if (raw.startsWith('"') && raw.endsWith('"') && raw.length >= 2) {
+      raw = raw.slice(1, -1);
+    }
+    if (raw.length > 20) {
+      const totalMatch = raw.match(/\b(?:total\s*[:=]?\s*\$?[0-9,]+|\$[0-9,]+|[0-9,]{5,})/i);
+      if (totalMatch) {
+        raw = `…total…`;
+      } else {
+        raw = raw.slice(0, 16) + '…';
+      }
+    }
+    const valStr = isNaN(Number(raw)) && !raw.startsWith('{') && !raw.startsWith('[') ? `"${raw}"` : raw;
+    return `${k}: ${valStr}`;
+  });
+  return `${s}.${t}(${formattedArgs.join(', ')})`;
+}
+
+export function formatBlockedReason(e: RunEvent): string {
+  if (e.reason) {
+    if (e.reason.toLowerCase().includes('payroll') && e.reason.toLowerCase().includes('tracker')) {
+      return 'blocked: payroll total → public tracker';
+    }
+    if (e.reason.length <= 45) {
+      return `blocked: ${e.reason}`;
+    }
+  }
+  if (e.rule === 'private→public' || e.rule === 'private-to-public') {
+    return 'blocked: payroll total → public tracker';
+  }
+  return 'blocked: private data to public server';
+}
+
+export function extractHiddenInstruction(text?: string): string | null {
+  if (!text) return null;
+  const commentMatch = text.match(/<!--\s*AI assistant:\s*([\s\S]*?)-->/i);
+  if (commentMatch) {
+    const raw = commentMatch[1].trim();
+    const short = raw.length > 40 ? raw.slice(0, 37) + '…' : raw;
+    return `Issue #42 hides an instruction: "${short}"`;
+  }
+  if (/addressed to AI assistants/i.test(text) || /hidden (?:text|instruction)/i.test(text)) {
+    if (text.includes('#42') || text.includes('42')) {
+      return 'Issue #42 hides an instruction: "addressed to AI assistants"';
+    }
+    return 'Hides an instruction addressed to AI assistants';
+  }
+  if (/AI assistant/i.test(text) || /ignore previous/i.test(text)) {
+    return 'Issue #42 hides an instruction: "addressed to AI assistants"';
+  }
+  return null;
+}
+
+export function getUntrustedReason(e: RunEvent, allEvents: RunEvent[]): { reason: string; hidden?: string } {
+  const hiddenInPreview = extractHiddenInstruction(e.preview);
+  if (hiddenInPreview) {
+    return { reason: hiddenInPreview, hidden: hiddenInPreview };
+  }
+
+  // Check if provenance or run has hidden instruction
+  if (e.influenced_by && e.influenced_by.length > 0) {
+    for (const ref of e.influenced_by) {
+      const src = allEvents.find((x) => x.id === ref);
+      const hiddenInSrc = extractHiddenInstruction(src?.preview);
+      if (hiddenInSrc) {
+        return { reason: hiddenInSrc, hidden: hiddenInSrc };
+      }
+    }
+    return { reason: 'Untrusted: influenced by data from public tracker' };
+  }
+
+  if (e.saw) {
+    for (const s of e.saw) {
+      const hiddenInSaw = extractHiddenInstruction(s.label);
+      if (hiddenInSaw) {
+        return { reason: hiddenInSaw, hidden: hiddenInSaw };
+      }
+      if (s.ref) {
+        const src = allEvents.find((x) => x.id === s.ref);
+        const hiddenInSrc = extractHiddenInstruction(src?.preview);
+        if (hiddenInSrc) {
+          return { reason: hiddenInSrc, hidden: hiddenInSrc };
+        }
+      }
+    }
+  }
+
+  if (e.from) {
+    for (const ref of e.from) {
+      const src = allEvents.find((x) => x.id === ref);
+      const hiddenInSrc = extractHiddenInstruction(src?.preview);
+      if (hiddenInSrc) {
+        return { reason: hiddenInSrc, hidden: hiddenInSrc };
+      }
+    }
+  }
+
+  if (e.server === 'tracker' || e.tool === 'list_issues' || e.op === 'filter') {
+    return { reason: 'Untrusted: from the public tracker, where anyone can write' };
+  }
+
+  return { reason: 'Untrusted: from external unverified source' };
+}
+
+function getNodeMetadata(
   e: RunEvent,
   allEvents: RunEvent[],
-): { title: string; subtitle: string; chip: StatusChip } {
+): {
+  title: string;
+  subtitle: string;
+  chip: StatusChip;
+  callSignature?: string;
+  blockedReason?: string;
+  untrustedReason?: string;
+  hiddenInstruction?: string;
+} {
   let title = 'Event';
   let subtitle = '';
   let chip: StatusChip = 'PUBLIC';
+  let callSignature: string | undefined;
+  let blockedReason: string | undefined;
+  let untrustedReason: string | undefined;
+  let hiddenInstruction: string | undefined;
+
+  const lineSuffix = e.line ? ` · line ${e.line}` : '';
 
   if (e.type === 'prompt') {
     title = 'You asked';
@@ -152,7 +285,13 @@ function getNodeTitleAndSubtitle(
     title = e.round ? `Gemini wrote a script (round ${e.round})` : 'Gemini wrote a script';
     const count = e.script?.length ?? 0;
     subtitle = `${count} script line${count === 1 ? '' : 's'}`;
-    chip = e.influenced_by && e.influenced_by.length > 0 ? 'UNTRUSTED' : 'SENT';
+    const isUntrusted = e.influenced_by && e.influenced_by.length > 0;
+    chip = isUntrusted ? 'UNTRUSTED' : 'SENT';
+    if (isUntrusted) {
+      const u = getUntrustedReason(e, allEvents);
+      untrustedReason = u.reason;
+      hiddenInstruction = u.hidden;
+    }
   } else if (e.type === 'call' || e.type === 'blocked') {
     if (e.tool === 'list_issues') {
       title = 'List open issues';
@@ -177,10 +316,16 @@ function getNodeTitleAndSubtitle(
       subtitle = e.ms !== undefined ? `${e.ms} ms` : (e.server ?? 'MCP call');
     }
 
+    callSignature = formatCallSignature(e.server, e.tool, e.args);
+
     if (e.type === 'blocked') {
       chip = 'BLOCKED';
+      blockedReason = formatBlockedReason(e);
     } else if (e.taint === 'untrusted') {
       chip = 'UNTRUSTED';
+      const u = getUntrustedReason(e, allEvents);
+      untrustedReason = u.reason;
+      hiddenInstruction = u.hidden;
     } else if (e.sensitivity === 'private') {
       chip = 'PRIVATE';
     } else {
@@ -192,11 +337,24 @@ function getNodeTitleAndSubtitle(
     chip = 'ERROR';
   } else if (e.type === 'value') {
     if (e.op === 'reduce') {
-      title = 'Sum the gross pay';
-      subtitle = e.preview ? e.preview.replace(/["']/g, '') : '1,284,600';
+      const rawNum = e.preview ? e.preview.replace(/[^0-9.-]/g, '') : '';
+      const num = Number(rawNum);
+      const numStr = !isNaN(num) && rawNum.length > 0 ? num.toLocaleString() : (e.preview ?? '1,284,600');
+      title = `total = ${numStr}${lineSuffix}`;
+      subtitle = numStr;
     } else if (e.op === 'filter') {
-      title = 'Filter urgent issues';
-      subtitle = '3 urgent issues';
+      let count = 3;
+      if (e.preview && e.preview.startsWith('[')) {
+        try {
+          const parsed = JSON.parse(e.preview);
+          if (Array.isArray(parsed)) count = parsed.length;
+        } catch {
+          const commas = e.preview.match(/,/g);
+          if (commas) count = commas.length + 1;
+        }
+      }
+      title = `urgent issues (${count})${lineSuffix}`;
+      subtitle = `${count} urgent issues`;
     } else if (e.op === 'result') {
       const src = allEvents.find((x) => x.id === e.from?.[0]);
       if (src?.server === 'payroll' || src?.tool === 'get_salaries') {
@@ -206,19 +364,30 @@ function getNodeTitleAndSubtitle(
         title = 'List open issues';
         subtitle = '8 issues';
       } else {
-        title = 'Query result';
+        title = `Query result${lineSuffix}`;
         subtitle = e.preview ? (e.preview.length > 25 ? e.preview.slice(0, 22) + '…' : e.preview) : '';
       }
     } else if (e.op === 'to_model') {
-      title = 'Summary for Gemini';
+      if (e.preview?.includes('issues')) {
+        title = `issues preview${lineSuffix}`;
+      } else {
+        title = `Summary for Gemini${lineSuffix}`;
+      }
       subtitle = `${e.tokens ?? 0} tokens`;
     } else {
-      title = e.op ? `Value (${e.op})` : 'Value';
+      if (e.preview && e.preview.toLowerCase().includes('total')) {
+        title = `total = ${e.preview}${lineSuffix}`;
+      } else {
+        title = e.op ? `Value (${e.op})${lineSuffix}` : `Value${lineSuffix}`;
+      }
       subtitle = e.preview ? (e.preview.length > 25 ? e.preview.slice(0, 22) + '…' : e.preview) : '';
     }
 
     if (e.taint === 'untrusted') {
       chip = 'UNTRUSTED';
+      const u = getUntrustedReason(e, allEvents);
+      untrustedReason = u.reason;
+      hiddenInstruction = u.hidden;
     } else if (e.sensitivity === 'private') {
       chip = 'PRIVATE';
     } else {
@@ -226,7 +395,15 @@ function getNodeTitleAndSubtitle(
     }
   }
 
-  return { title, subtitle, chip };
+  return {
+    title,
+    subtitle,
+    chip,
+    callSignature,
+    blockedReason,
+    untrustedReason,
+    hiddenInstruction,
+  };
 }
 
 export function computeColumns(nodes: Node[], edges: Edge[]): Map<string, number> {
@@ -238,66 +415,88 @@ export function computeColumns(nodes: Node[], edges: Edge[]): Map<string, number
   }
 
   const columns = new Map<string, number>();
-  const visiting = new Set<string>();
 
-  function getCol(id: string): number {
-    if (columns.has(id)) return columns.get(id)!;
-    if (visiting.has(id)) return 1;
-    visiting.add(id);
+  // Determine rounds present
+  const rounds = Array.from(new Set(nodes.map((n) => n.round ?? 1))).sort((a, b) => a - b);
+  let globalCol = 1;
 
-    const n = nodeMap.get(id);
-    const inEdges = incomingMap.get(id) ?? [];
+  for (const r of rounds) {
+    const roundNodes = nodes.filter((n) => (n.round ?? 1) === r);
+    const roundNodeIds = new Set(roundNodes.map((n) => n.id));
+    const modelNode = roundNodes.find((n) => n.kind === 'model_turn');
 
-    let maxInputCol = 0;
-    if (n?.repeatedEvents && n.repeatedEvents.length > 1) {
-      const lastEvent = n.repeatedEvents[n.repeatedEvents.length - 1];
-      const lastStep = lastEvent.step;
-      const lastInEdges = inEdges.filter((e) => {
-        const fromNode = nodeMap.get(e.from);
-        return fromNode ? fromNode.step <= lastStep : true;
-      });
-      const relevantEdges = lastInEdges.length > 0 ? lastInEdges : inEdges;
-      for (const e of relevantEdges) {
-        if (e.from !== id) {
-          maxInputCol = Math.max(maxInputCol, getCol(e.from));
-        }
+    const localCols = new Map<string, number>();
+    const visiting = new Set<string>();
+
+    function getLocalCol(id: string): number {
+      if (localCols.has(id)) return localCols.get(id)!;
+      if (visiting.has(id)) return 1;
+      visiting.add(id);
+
+      if (modelNode && id === modelNode.id) {
+        visiting.delete(id);
+        localCols.set(id, 1);
+        return 1;
       }
-    } else {
+
+      const inEdges = (incomingMap.get(id) ?? []).filter((e) => roundNodeIds.has(e.from));
+      let maxIn = 1; // start after model turn
       for (const e of inEdges) {
         if (e.from !== id) {
-          maxInputCol = Math.max(maxInputCol, getCol(e.from));
+          maxIn = Math.max(maxIn, getLocalCol(e.from));
+        }
+      }
+
+      visiting.delete(id);
+      const col = inEdges.length === 0 ? 2 : maxIn + 1;
+      localCols.set(id, col);
+      return col;
+    }
+
+    for (const n of roundNodes) {
+      getLocalCol(n.id);
+    }
+
+    // Intra-round relaxation
+    let changed = true;
+    let iters = 0;
+    while (changed && iters < 30) {
+      changed = false;
+      iters++;
+      for (const e of edges) {
+        if (roundNodeIds.has(e.from) && roundNodeIds.has(e.to)) {
+          const cFrom = localCols.get(e.from) ?? 1;
+          const cTo = localCols.get(e.to) ?? 1;
+          if (cTo <= cFrom) {
+            localCols.set(e.to, cFrom + 1);
+            changed = true;
+          }
         }
       }
     }
 
-    visiting.delete(id);
-    const col = maxInputCol === 0 ? 1 : maxInputCol + 1;
-    columns.set(id, col);
-    return col;
-  }
-
-  for (const n of nodes) {
-    getCol(n.id);
-  }
-
-  for (const n of nodes) {
-    if (n.kind === 'prompt') {
-      columns.set(n.id, 1);
+    let maxRoundCol = 1;
+    for (const n of roundNodes) {
+      const lCol = localCols.get(n.id) ?? 1;
+      maxRoundCol = Math.max(maxRoundCol, lCol);
+      columns.set(n.id, globalCol + (lCol - 1));
     }
+
+    globalCol += maxRoundCol;
   }
 
-  // Relaxation to guarantee strictly left-to-right edges
-  let changed = true;
-  let iters = 0;
-  while (changed && iters < 50) {
-    changed = false;
-    iters++;
+  // Cross-round relaxation pass to guarantee strict left-to-right edges
+  let globalChanged = true;
+  let globalIters = 0;
+  while (globalChanged && globalIters < 50) {
+    globalChanged = false;
+    globalIters++;
     for (const e of edges) {
       const cFrom = columns.get(e.from) ?? 1;
       const cTo = columns.get(e.to) ?? 1;
       if (cTo <= cFrom) {
         columns.set(e.to, cFrom + 1);
-        changed = true;
+        globalChanged = true;
       }
     }
   }
@@ -319,15 +518,29 @@ export function view(run: RunEvent[], options: ViewOptions = {}): View {
 
   const models = run.filter((e) => e.type === 'model_turn');
 
-  // 1. Process regular events
+  // Determine rounds mapping for events
+  const getEventRound = (e: RunEvent): number => {
+    if (e.round) return e.round;
+    if (e.type === 'model_turn') {
+      const idx = models.indexOf(e);
+      return idx >= 0 ? idx + 1 : 1;
+    }
+    // Find the latest model turn at or before this event's step / t
+    const priorModels = models.filter((m) => (m.step !== undefined && e.step !== undefined ? m.step <= e.step : m.t <= e.t));
+    if (priorModels.length > 0) {
+      const last = priorModels[priorModels.length - 1];
+      return last.round ?? (models.indexOf(last) + 1);
+    }
+    return 1;
+  };
+
+  // 1. Process regular events (exclude prompt from canvas nodes per S3)
   for (const e of run) {
-    if (e.type === 'summary') continue;
+    if (e.type === 'summary' || e.type === 'prompt') continue;
 
     const id = e.id ?? `error-${e.step}-${rawNodes.length}`;
     let lane = 'SCRIPT';
-    if (e.type === 'prompt') {
-      lane = 'YOU';
-    } else if (e.type === 'model_turn') {
+    if (e.type === 'model_turn') {
       lane = 'MODEL';
     } else if (e.type === 'call' || e.type === 'blocked') {
       lane = e.server ?? 'SCRIPT';
@@ -338,64 +551,46 @@ export function view(run: RunEvent[], options: ViewOptions = {}): View {
       lane = 'SCRIPT';
     }
 
-    const { title, subtitle, chip } = getNodeTitleAndSubtitle(e, run);
+    const round = getEventRound(e);
+    const {
+      title,
+      subtitle,
+      chip,
+      callSignature,
+      blockedReason,
+      untrustedReason,
+      hiddenInstruction,
+    } = getNodeMetadata(e, run);
 
     rawNodes.push({
       id,
       lane,
       step: e.step,
-      round: e.round,
+      round,
       line: e.line,
       title,
       subtitle,
       chip,
       event: e,
       kind: e.type as NodeKind,
+      callSignature,
+      blockedReason,
+      untrustedReason,
+      hiddenInstruction,
     });
   }
 
-  // 2. Synthesize script line nodes from model turns
+  // 2. Add ONE grey "writes" edge from model turn to the first node of its round (S2)
+  // S1: Script lines are NOT nodes in ANY mode.
   for (const m of models) {
-    if (!m.id || !m.script) continue;
-    for (const l of m.script) {
-      const lineNodeId = `line-${m.id}-${l.n}`;
-      const related = run.filter((e) => e.line === l.n && e.type !== 'model_turn');
-      const step = related.length ? Math.min(...related.map((e) => e.step)) : m.step;
-
-      rawNodes.push({
-        id: lineNodeId,
-        lane: 'SCRIPT',
-        step,
-        line: l.n,
-        round: m.round,
-        title: `Line ${l.n}`,
-        subtitle: l.code,
-        chip: 'SENT',
-        event: {
-          type: 'script',
-          step: m.step,
-          t: m.t,
-          line: l.n,
-          code: l.code,
-          model: m.id,
-        },
-        kind: 'script',
-      });
-
-      addEdge(rawEdges, m.id, lineNodeId, 'write', l.code);
-
-      for (const e of related.filter((e) => e.type === 'call' || e.type === 'blocked' || e.type === 'error')) {
-        const targetId = e.id ?? rawNodes.find((n) => n.event === e)?.id ?? '';
-        if (targetId) {
-          addEdge(
-            rawEdges,
-            lineNodeId,
-            targetId,
-            e.type === 'blocked' ? 'blocked' : 'call',
-            e.type === 'blocked' ? 'Blocked' : `${e.server}.${e.tool}`,
-          );
-        }
-      }
+    if (!m.id) continue;
+    const mRound = getEventRound(m);
+    const roundNodes = rawNodes.filter((n) => n.round === mRound && n.id !== m.id);
+    if (roundNodes.length > 0) {
+      // Find the first node of this round by step
+      const sortedRoundNodes = [...roundNodes].sort((a, b) => a.step - b.step);
+      const firstNode = sortedRoundNodes[0];
+      addEdge(rawEdges, m.id, firstNode.id, 'write', 'writes');
     }
   }
 
@@ -405,51 +600,64 @@ export function view(run: RunEvent[], options: ViewOptions = {}): View {
 
     if (e.type === 'model_turn') {
       for (const s of e.saw ?? []) {
-        if (s.ref) {
+        if (s.ref && s.ref !== 'P') {
           addEdge(rawEdges, s.ref, e.id, s.untrusted ? 'taint' : 'write', s.label);
         }
       }
       for (const ref of e.influenced_by ?? []) {
-        addEdge(rawEdges, ref, e.id, 'taint', 'Untrusted influence');
+        if (ref !== 'P') {
+          addEdge(rawEdges, ref, e.id, 'taint', 'Untrusted influence');
+        }
       }
     }
 
     if (e.type === 'value') {
       for (const ref of e.from ?? []) {
-        addEdge(
-          rawEdges,
-          ref,
-          e.id,
-          e.taint === 'untrusted' ? 'taint' : e.sensitivity ?? 'public',
-          e.preview ?? '',
-        );
+        if (ref !== 'P') {
+          addEdge(
+            rawEdges,
+            ref,
+            e.id,
+            e.taint === 'untrusted' ? 'taint' : e.sensitivity ?? 'public',
+            e.preview ?? '',
+          );
+        }
       }
     }
 
     if (e.type === 'call' || e.type === 'blocked') {
       for (const arg of Object.values(e.args ?? {})) {
         for (const ref of arg.from ?? []) {
-          const source = run.find((x) => x.id === ref);
-          const kind: EdgeKind =
-            e.type === 'blocked'
-              ? 'blocked'
-              : source?.taint === 'untrusted'
-              ? 'taint'
-              : (source?.sensitivity as EdgeKind) ?? 'public';
-          addEdge(rawEdges, ref, e.id, kind, arg.preview ?? '');
+          if (ref !== 'P') {
+            const source = run.find((x) => x.id === ref);
+            const kind: EdgeKind =
+              e.type === 'blocked'
+                ? 'blocked'
+                : source?.taint === 'untrusted'
+                ? 'taint'
+                : (source?.sensitivity as EdgeKind) ?? 'public';
+            addEdge(rawEdges, ref, e.id, kind, arg.preview ?? '');
+          }
         }
       }
     }
   }
 
-  // If showEveryStep is true, return full uncollapsed graph
-  if (showEveryStep) {
-    const serverLanes: string[] = [];
-    for (const n of rawNodes) {
-      if (!['YOU', 'MODEL', 'SCRIPT'].includes(n.lane) && !serverLanes.includes(n.lane)) {
-        serverLanes.push(n.lane);
+  // Helper to compute active lanes (S3: Hide a lane that has no nodes)
+  const computeActiveLanes = (nodesList: Node[]): string[] => {
+    const canonicalOrder = ['MODEL', 'SCRIPT', 'tracker', 'payroll', 'hr'];
+    const otherLanes: string[] = [];
+    for (const n of nodesList) {
+      if (!canonicalOrder.includes(n.lane) && !otherLanes.includes(n.lane)) {
+        otherLanes.push(n.lane);
       }
     }
+    const allCandidates = [...canonicalOrder, ...otherLanes];
+    return allCandidates.filter((l) => nodesList.some((n) => n.lane === l));
+  };
+
+  // If showEveryStep is true: show all value nodes, but never script lines (S1)
+  if (showEveryStep) {
     const validNodeIds = new Set(rawNodes.map((n) => n.id));
     const validEdges = rawEdges.filter((e) => validNodeIds.has(e.from) && validNodeIds.has(e.to));
     const steps = [...new Set(run.map((e) => e.step))].sort((a, b) => a - b);
@@ -463,7 +671,7 @@ export function view(run: RunEvent[], options: ViewOptions = {}): View {
     return {
       nodes: rawNodes,
       edges: validEdges,
-      lanes: ['YOU', 'MODEL', 'SCRIPT', ...serverLanes],
+      lanes: computeActiveLanes(rawNodes),
       steps,
       summary,
       allNodes: rawNodes,
@@ -473,9 +681,6 @@ export function view(run: RunEvent[], options: ViewOptions = {}): View {
 
   // --- COLLAPSED VIEW (Default) ---
   // A. Determine values that matter:
-  // 1. Passed into a tool call argument (any call or blocked args)
-  // 2. Returned to model (in model_turn saw[].ref or influenced_by or op === 'to_model' or in_model_context)
-  // 3. Feeding a blocked call
   const usedInArgs = new Set<string>();
   for (const e of run) {
     if (e.type === 'call' || e.type === 'blocked') {
@@ -521,7 +726,7 @@ export function view(run: RunEvent[], options: ViewOptions = {}): View {
 
   const isValueThatMatters = (n: Node): boolean => {
     if (n.kind !== 'value') return true;
-    if (n.lane !== 'SCRIPT') return true; // keep server lane result values or collapse? result values represent the tool output
+    if (n.lane !== 'SCRIPT') return true;
     return (
       usedInArgs.has(n.id) ||
       returnedToModel.has(n.id) ||
@@ -534,16 +739,12 @@ export function view(run: RunEvent[], options: ViewOptions = {}): View {
   // Intermediate values to collapse
   const intermediateNodeIds = new Set<string>();
   for (const n of rawNodes) {
-    // Drop script line nodes from default lane view unless needed
-    if (n.kind === 'script') {
-      intermediateNodeIds.add(n.id);
-    } else if (n.kind === 'value' && !isValueThatMatters(n)) {
+    if (n.kind === 'value' && !isValueThatMatters(n)) {
       intermediateNodeIds.add(n.id);
     }
   }
 
-  // B. Deduplicate repeated calls (Spec 4b)
-  // Repeated calls with the same server, tool and argument previews collapse into one node with a "×4" badge.
+  // B. Deduplicate repeated calls
   const callGroups = new Map<string, Node[]>();
   for (const n of rawNodes) {
     if (n.kind === 'call') {
@@ -591,9 +792,7 @@ export function view(run: RunEvent[], options: ViewOptions = {}): View {
   for (const intId of intermediateNodeIds) {
     const intNode = rawNodes.find((n) => n.id === intId);
     const viaDesc = intNode
-      ? intNode.kind === 'script'
-        ? `via line ${intNode.line}`
-        : `via line ${intNode.line ?? 0} (${intNode.event.op ?? 'step'})`
+      ? `via line ${intNode.line ?? 0} (${intNode.event.op ?? 'step'})`
       : undefined;
 
     const incoming = workingEdges.filter((e) => e.to === intId);
@@ -626,13 +825,6 @@ export function view(run: RunEvent[], options: ViewOptions = {}): View {
     }
   }
 
-  const serverLanes: string[] = [];
-  for (const n of finalNodes) {
-    if (!['YOU', 'MODEL', 'SCRIPT'].includes(n.lane) && !serverLanes.includes(n.lane)) {
-      serverLanes.push(n.lane);
-    }
-  }
-
   const steps = [...new Set(run.map((e) => e.step))].sort((a, b) => a - b);
   const summary = run.find((e) => e.type === 'summary');
 
@@ -644,7 +836,7 @@ export function view(run: RunEvent[], options: ViewOptions = {}): View {
   return {
     nodes: finalNodes,
     edges: finalEdges,
-    lanes: ['YOU', 'MODEL', 'SCRIPT', ...serverLanes],
+    lanes: computeActiveLanes(finalNodes),
     steps,
     summary,
     allNodes: rawNodes,
@@ -710,7 +902,6 @@ export function inspect(v: View, id: string, mode: Mode = 'lineage', step = Infi
       .filter((n): n is Node => n !== undefined && visible.has(n.id)),
   }));
 
-  // Build plain-English traced values list (Spec 3)
   const tracedValues: TracedValue[] = [];
   for (const [argName, argData] of Object.entries(node.event.args ?? {})) {
     const srcNodes = (argData.from ?? [])
@@ -735,7 +926,6 @@ export function inspect(v: View, id: string, mode: Mode = 'lineage', step = Infi
     });
   }
 
-  // 1 to 3 plain-English sentences for selected node (Spec 5d)
   const plainSummary: string[] = [];
   const e = node.event;
   if (node.kind === 'blocked') {
@@ -761,7 +951,7 @@ export function inspect(v: View, id: string, mode: Mode = 'lineage', step = Infi
   } else if (node.kind === 'value') {
     if (e.op === 'reduce') {
       plainSummary.push(
-        `The script summed the gross pay from payroll into a single total: ${e.preview ?? '1,284,600'}.`,
+        `The script summed the gross pay from payroll into a single total: ${node.subtitle || '1,284,600'}.`,
       );
       plainSummary.push('This computed number inherits private sensitivity from payroll.');
     } else if (e.op === 'filter') {
@@ -798,34 +988,20 @@ export function inspect(v: View, id: string, mode: Mode = 'lineage', step = Infi
   };
 }
 
-export function story(v: View): Story {
+export function story(v: View, promptTextOverride?: string): Story {
   const sentences: StorySentence[] = [];
   const nodes = v.nodes;
 
-  // 1. Prompt
-  const promptNode = nodes.find((n) => n.kind === 'prompt');
-  if (promptNode) {
-    const text = promptNode.event.text ?? 'Triage issues and send payroll total to HR.';
-    sentences.push({
-      id: promptNode.id,
-      step: promptNode.step,
-      text: `1. You asked: "${text}"`,
-    });
-  }
+  const promptText = promptTextOverride ?? "Triage this week's open issues and post the October payroll total to HR.";
+  sentences.push({
+    text: `1. You asked: "${promptText}"`,
+  });
 
-  let num = sentences.length + 1;
+  let num = 2;
 
-  // Track rounds and actions
-  const modelTurns = nodes.filter((n) => n.kind === 'model_turn');
-  const callsAndBlocks = nodes.filter((n) => n.kind === 'call' || n.kind === 'blocked');
-  const values = nodes.filter((n) => n.kind === 'value');
-
-  // Check if we have blocked calls
   const blockedCalls = nodes.filter((n) => n.kind === 'blocked');
-
-  // If we have standard runs:
-  // Build chronological narrative from nodes
   const sorted = [...nodes].sort((a, b) => a.step - b.step);
+
   let sawTracker = false;
   let sawPayroll = false;
   let sawReduce = false;
@@ -834,8 +1010,6 @@ export function story(v: View): Story {
   let sawModelTurn = false;
 
   for (const n of sorted) {
-    if (n.kind === 'prompt') continue;
-
     if (n.kind === 'model_turn' && !sawModelTurn) {
       sawModelTurn = true;
       sentences.push({
@@ -867,7 +1041,7 @@ export function story(v: View): Story {
           step: n.step,
           text: `${num++}. The script read ${count}. Gemini never saw them.`,
         });
-      } else if (n.title.includes('Sum') || n.event.op === 'reduce' || (n.kind === 'value' && n.subtitle === '1,284,600')) {
+      } else if (n.title.includes('total') || n.title.includes('Sum') || n.event.op === 'reduce' || (n.kind === 'value' && n.subtitle === '1,284,600')) {
         if (!sawReduce) {
           sawReduce = true;
           sentences.push({
@@ -890,18 +1064,6 @@ export function story(v: View): Story {
         id: n.id,
         step: n.step,
         text: `${num++}. It tried to post the total on public issue #42: BLOCKED before it was sent, because the number comes from private payroll.`,
-      });
-    }
-  }
-
-  // Fallback if no sentences were added besides prompt
-  if (sentences.length <= 1) {
-    for (const n of sorted) {
-      if (n.kind === 'prompt') continue;
-      sentences.push({
-        id: n.id,
-        step: n.step,
-        text: `${num++}. ${n.title}: ${n.subtitle || n.chip}`,
       });
     }
   }

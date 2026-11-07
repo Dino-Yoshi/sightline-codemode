@@ -3,16 +3,22 @@ import { describe, it, expect, vi } from 'vitest';
 import { render, screen, fireEvent, act } from '@testing-library/react';
 import { App } from './main';
 
-describe('App Component Integration Tests', () => {
-  it('renders top bar, task, brand, and replay controls', () => {
+describe('App Component Integration Tests (Polish Round 3)', () => {
+  it('renders top bar, task, brand, replay controls, and prompt banner (S3)', () => {
     const { container } = render(<App />);
     expect(container.querySelector('.brand')).toHaveTextContent('MCPVision');
     expect(screen.getByText('YOUR TASK')).toBeInTheDocument();
     expect(screen.getAllByText(/Triage this week's open issues/).length).toBeGreaterThan(0);
     expect(screen.getByText('Run replay')).toBeInTheDocument();
+
+    // S3: Prompt banner above canvas
+    const promptBanner = container.querySelector('.prompt-banner');
+    expect(promptBanner).toBeInTheDocument();
+    expect(promptBanner).toHaveTextContent(/You asked:/);
+    expect(promptBanner).toHaveTextContent(/Triage this week's open issues and post the October payroll total to HR/);
   });
 
-  it('renders script pane with rounds and model-generated lines', () => {
+  it('renders script pane with rounds and model-generated lines without script nodes on canvas (S1)', () => {
     const { container } = render(<App />);
     expect(screen.getByText('GENERATED CODE')).toBeInTheDocument();
     expect(screen.getByText('ROUND 1')).toBeInTheDocument();
@@ -20,11 +26,16 @@ describe('App Component Integration Tests', () => {
     const scriptLines = container.querySelectorAll('.script-pane code');
     expect(scriptLines.length).toBeGreaterThan(0);
     expect(scriptLines[0]).toHaveTextContent('tracker.list_issues');
+
+    // Canvas must NOT have any script line nodes
+    const cards = Array.from(container.querySelectorAll('.node-card'));
+    expect(cards.some((c) => c.classList.contains('kind-script'))).toBe(false);
   });
 
-  it('renders all lane headers including plain descriptions and context tokens', () => {
+  it('renders active lane headers including plain descriptions and context tokens (S3: no YOU lane)', () => {
     render(<App />);
-    expect(screen.getByText('YOU')).toBeInTheDocument();
+    // S3: YOU lane is removed
+    expect(screen.queryByText('YOU')).not.toBeInTheDocument();
     expect(screen.getByText('MODEL')).toBeInTheDocument();
     expect(screen.getByText('SCRIPT')).toBeInTheDocument();
     expect(screen.getByText('TRACKER')).toBeInTheDocument();
@@ -44,10 +55,15 @@ describe('App Component Integration Tests', () => {
     expect(screen.getByText(/Gemini saw 920 tokens. 15,060 tokens stayed inside the sandbox./)).toBeInTheDocument();
   });
 
-  it('opens detail drawer with policy reason when blocked node is selected', () => {
+  it('S6: Shows call signature and blocked reason on blocked node card and opens detail drawer', () => {
     const { container } = render(<App />);
     const blockedNode = Array.from(container.querySelectorAll('.node-card.chip-blocked'))[0];
     expect(blockedNode).toBeDefined();
+
+    // S6: Monospace call line and blocked reason on card
+    expect(blockedNode.querySelector('.node-call-sig')).toHaveTextContent('tracker.post_comment');
+    expect(blockedNode.querySelector('.node-blocked-reason')).toHaveTextContent('blocked: payroll total → public tracker');
+
     fireEvent.click(blockedNode);
 
     // Detail drawer opens
@@ -59,8 +75,22 @@ describe('App Component Integration Tests', () => {
 
     // Arguments and policy decision
     expect(screen.getByText('ARGUMENTS')).toBeInTheDocument();
-    expect(screen.getByText(/Blocked · private→public/)).toBeInTheDocument();
+    expect(screen.getByText(/Blocked · blocked: payroll total → public tracker/)).toBeInTheDocument();
     expect(screen.getByText('Not sent')).toBeInTheDocument();
+  });
+
+  it('S7: Shows untrusted reason on UNTRUSTED node cards and explains why in detail drawer', () => {
+    const { container } = render(<App />);
+    const untrustedCard = Array.from(container.querySelectorAll('.node-card.chip-untrusted')).find((el) =>
+      el.textContent?.includes('issues preview'),
+    );
+    expect(untrustedCard).toBeDefined();
+    // Excerpt quoted on card
+    expect(untrustedCard?.querySelector('.node-untrusted-reason')).toHaveTextContent(/Issue #42 hides an instruction/);
+
+    fireEvent.click(untrustedCard!);
+    expect(screen.getByText('UNTRUSTED DATA SOURCE')).toBeInTheDocument();
+    expect(screen.getByText('HIDDEN INSTRUCTION DETECTED')).toBeInTheDocument();
   });
 
   it('navigates to source node when argument source chip is clicked', () => {
@@ -68,8 +98,8 @@ describe('App Component Integration Tests', () => {
     const blockedNode = Array.from(container.querySelectorAll('.node-card.chip-blocked'))[0];
     fireEvent.click(blockedNode);
 
-    // Find and click the chip for Sum the gross pay
-    const sourceChip = screen.getByTitle('Inspect Sum the gross pay');
+    // Find and click the chip for total = 1,284,600
+    const sourceChip = screen.getByTitle(/Inspect total = 1,284,600/);
     expect(sourceChip).toBeInTheDocument();
     fireEvent.click(sourceChip);
 
@@ -80,7 +110,7 @@ describe('App Component Integration Tests', () => {
     expect(drawer).toHaveTextContent('private');
   });
 
-  it('syncs script line clicks with graph node selection', () => {
+  it('syncs script line clicks with graph node selection (S1)', () => {
     const { container } = render(<App />);
     // Line 1 code line button
     const line1Btn = screen.getByTitle('Line 1');
@@ -138,14 +168,12 @@ describe('App Component Integration Tests', () => {
     expect(screen.getByText('Untrusted taint')).toBeInTheDocument();
   });
 
-  it('toggles show every step mode', () => {
+  it('toggles show every step mode (S1: intermediate values)', () => {
     render(<App />);
     const showEveryStepBtn = screen.getByText('Show every step');
     fireEvent.click(showEveryStepBtn);
-    expect(screen.getByText('✓ Showing every step')).toBeInTheDocument();
+    expect(screen.getByText('✓ Showing intermediate values')).toBeInTheDocument();
   });
-
-  // --- POLISH ROUND 2 SPEC TESTS ---
 
   it('R1: Dims every node and edge not in the lineage when a node is selected', () => {
     const { container } = render(<App />);
@@ -160,15 +188,15 @@ describe('App Component Integration Tests', () => {
     expect(hrNode).toBeDefined();
     expect(hrNode).toHaveClass('dim');
 
-    // Node c4 itself and its lineage (e.g. "Sum the gross pay") must NOT have dim class
+    // Node c4 itself and its lineage (e.g. "total = 1,284,600 · line 4") must NOT have dim class
     expect(blockedNode).not.toHaveClass('dim');
     expect(blockedNode).toHaveClass('selected');
 
-    const sumNode = Array.from(container.querySelectorAll('.node-card')).find((el) =>
-      el.textContent?.includes('Sum the gross pay'),
+    const totalNode = Array.from(container.querySelectorAll('.node-card')).find((el) =>
+      el.textContent?.includes('total = 1,284,600'),
     );
-    expect(sumNode).toBeDefined();
-    expect(sumNode).not.toHaveClass('dim');
+    expect(totalNode).toBeDefined();
+    expect(totalNode).not.toHaveClass('dim');
 
     // Check SVG wires dimming: faded for non-lineage, lit for lineage
     const wires = Array.from(container.querySelectorAll('svg.wires g.wire'));
@@ -184,22 +212,21 @@ describe('App Component Integration Tests', () => {
     const straceChips = container.querySelectorAll('.strace-row .strace-type');
     expect(straceChips.length).toBeGreaterThan(0);
 
-    // Check that chip classes like chip-blocked, chip-private, chip-untrusted are applied
     const chipClasses = Array.from(straceChips).map((el) => el.className);
     expect(chipClasses.some((c) => c.includes('chip-blocked'))).toBe(true);
     expect(chipClasses.some((c) => c.includes('chip-private'))).toBe(true);
     expect(chipClasses.some((c) => c.includes('status-chip'))).toBe(true);
   });
 
-  it('L1 & L2: Positions nodes with left-to-right columns and renders orthogonal edge paths', () => {
+  it('L1 & L2: Positions nodes with left-to-right columns and renders orthogonal edge paths (S2)', () => {
     const { container } = render(<App />);
     const cards = Array.from(container.querySelectorAll('.node-card')) as HTMLElement[];
     expect(cards.length).toBeGreaterThan(0);
 
-    // Prompt node should be on the leftmost column (left = 170px)
-    const promptCard = cards.find((c) => c.textContent?.includes('You asked'));
-    expect(promptCard).toBeDefined();
-    expect(promptCard?.style.left).toBe('170px');
+    // Model turn 1 should be on the leftmost column (left = 180px)
+    const m1Card = cards.find((c) => c.textContent?.includes('round 1') || c.textContent?.includes('writes code') || c.textContent?.includes('Gemini wrote a script'));
+    expect(m1Card).toBeDefined();
+    expect(m1Card?.style.left).toBe('180px');
 
     // Wires have orthogonal path commands (M, L, Q)
     const wirePaths = Array.from(container.querySelectorAll('svg.wires g.wire path'));
@@ -218,43 +245,61 @@ describe('App Component Integration Tests', () => {
     expect(fitBtn).toHaveTextContent('Fit');
   });
 
-  it('F1: Smoothly centers newest node on auto-follow during replay', () => {
+  it('S4: Programmatic smooth scrolls do not cancel auto-follow, only user interaction cancels it', () => {
     const scrollSpy = vi.spyOn(Element.prototype, 'scrollTo');
     const { container } = render(<App />);
 
-    // Click next step
+    // Step navigation triggers programmatic scroll
     const nextBtn = screen.getByLabelText('Next step');
     fireEvent.click(nextBtn);
-
-    // scrollTo should be invoked by autoFollow
     expect(scrollSpy).toHaveBeenCalled();
+
+    // Auto-follow button should NOT appear because auto-follow remains true
+    expect(screen.queryByTitle(/Resume following/)).not.toBeInTheDocument();
+
+    // Wheel on canvas cancels autoFollow
+    const canvasScroll = container.querySelector('.canvas-scroll')!;
+    fireEvent.wheel(canvasScroll);
+
+    // Now Follow button appears
+    expect(screen.getByTitle(/Resume following/)).toBeInTheDocument();
+
+    // Clicking Follow resumes it
+    fireEvent.click(screen.getByTitle(/Resume following/));
+    expect(screen.queryByTitle(/Resume following/)).not.toBeInTheDocument();
+
+    // Keydown arrow cancels autoFollow
+    fireEvent.keyDown(window, { key: 'ArrowRight' });
+    expect(screen.getByTitle(/Resume following/)).toBeInTheDocument();
+
     scrollSpy.mockRestore();
   });
 
-  it('F4: Allows collapsing both side panes manually and toggles Focus mode', () => {
+  it('S5 & F4: Collapse chevrons are in header rows and side panes collapse', () => {
     const { container } = render(<App />);
 
     // Focus toggle button exists and defaults to on
     const focusBtn = screen.getByTitle('Auto-collapse side panes during playback');
     expect(focusBtn).toHaveTextContent('✓ Focus on');
 
-    // Collapse left script pane manually
+    // S5: Collapse script pane button is inside .pane-head-actions
     const collapseScriptBtn = screen.getByLabelText('Collapse Script Pane');
+    expect(collapseScriptBtn.closest('.pane-head-actions')).toBeInTheDocument();
     fireEvent.click(collapseScriptBtn);
 
-    // Script pane should now be a 28px rail
+    // Script pane is now collapsed rail
     expect(container.querySelector('.script-pane.collapsed-rail')).toBeInTheDocument();
     expect(screen.getByLabelText('Expand Script Pane')).toBeInTheDocument();
 
-    // Expand script pane again
+    // Expand again
     fireEvent.click(screen.getByLabelText('Expand Script Pane'));
     expect(container.querySelector('.script-pane:not(.collapsed-rail)')).toBeInTheDocument();
 
-    // Collapse right detail/story drawer manually
+    // S5: Collapse story pane button is inside .drawer-head-actions
     const collapseStoryBtn = screen.getByLabelText('Collapse Story Pane');
+    expect(collapseStoryBtn.closest('.drawer-head-actions')).toBeInTheDocument();
     fireEvent.click(collapseStoryBtn);
     expect(container.querySelector('.drawer.collapsed-rail')).toBeInTheDocument();
-    expect(screen.getByLabelText('Expand Details Pane')).toBeInTheDocument();
   });
 
   it('P1: Truncates scripts longer than 12 lines in Model Turn detail with show all lines toggle', () => {
@@ -278,25 +323,5 @@ describe('App Component Integration Tests', () => {
     // Click to expand
     fireEvent.click(showAllBtn);
     expect(screen.getByText('Show fewer lines')).toBeInTheDocument();
-  });
-
-  it('P2: Displays actual prompt text on YOU node, Story sentence 1, and clamped in YOU lane header', () => {
-    const { container } = render(<App />);
-
-    // YOU node card shows "You asked" and prompt text
-    const youNode = Array.from(container.querySelectorAll('.node-card')).find((el) =>
-      el.textContent?.includes('You asked'),
-    );
-    expect(youNode).toBeDefined();
-    expect(youNode?.textContent).toContain("Triage this week's open issues");
-
-    // Story sentence 1 shows "1. You asked: ..."
-    expect(screen.getByText(/1\. You asked: "Triage this week's open issues/)).toBeInTheDocument();
-
-    // YOU lane subtitle in header is clamped and has tooltip
-    const youLaneDesc = container.querySelector('.lane-desc.clamp-2');
-    expect(youLaneDesc).toBeDefined();
-    expect(youLaneDesc).toHaveAttribute('title');
-    expect(youLaneDesc?.getAttribute('title')).toContain("Triage this week's open issues");
   });
 });

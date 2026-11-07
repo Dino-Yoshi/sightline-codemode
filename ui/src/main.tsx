@@ -11,7 +11,6 @@ import {
   type Node,
   type Edge,
   type RunEvent,
-  type StatusChip,
 } from './view';
 import './style.css';
 
@@ -31,12 +30,12 @@ const LANE_SUBTITLES: Record<string, string> = {
   hr: 'HR only',
 };
 
-const NODE_WIDTH = 200;
-const NODE_HEIGHT = 72;
-const CARD_GAP_Y = 12;
-const COLUMN_WIDTH = 270;
+const NODE_WIDTH = 220;
+const NODE_HEIGHT = 80;
+const CARD_GAP_Y = 14;
+const COLUMN_WIDTH = 290;
 const GUTTER_WIDTH = 70;
-const LEFT_OFFSET = 170;
+const LEFT_OFFSET = 180;
 
 export function App() {
   const [source, setSource] = useState<'recorded' | 'live'>('recorded');
@@ -54,7 +53,7 @@ export function App() {
   const [autoFollow, setAutoFollow] = useState<boolean>(true);
   const [showLegend, setShowLegend] = useState<boolean>(false);
 
-  // Side Panes and Focus Mode (Polish F4)
+  // Side Panes and Focus Mode (Polish F4, S5)
   const [leftCollapsed, setLeftCollapsed] = useState<boolean>(false);
   const [rightCollapsed, setRightCollapsed] = useState<boolean>(false);
   const [focusMode, setFocusMode] = useState<boolean>(true);
@@ -79,13 +78,16 @@ export function App() {
     return parseRun(txt);
   }, [source, liveEvents, recordedKey]);
 
+  const promptEvent = rawEvents.find((e) => e.type === 'prompt');
+  const promptText = promptEvent?.text ?? "Triage issues and send payroll total to HR.";
+
   const graph = useMemo(() => {
     return view(rawEvents, { showEveryStep: effectiveShowEveryStep });
   }, [rawEvents, effectiveShowEveryStep]);
 
   const runStory = useMemo(() => {
-    return story(graph);
-  }, [graph]);
+    return story(graph, promptText);
+  }, [graph, promptText]);
 
   const maxStep = graph.steps.at(-1) ?? 1;
 
@@ -178,7 +180,7 @@ export function App() {
     return new Set(visibleNodes.map((n) => n.id));
   }, [visibleNodes]);
 
-  // Layered Layout computation & Orthogonal routing (Polish L1, L2, L3)
+  // Layered Layout computation & Orthogonal routing (Polish L1, L2, L3, S2, S3)
   const layout = useMemo(() => {
     const laneHeightMap: Record<string, number> = {};
     const laneTopMap: Record<string, number> = {};
@@ -201,8 +203,8 @@ export function App() {
       laneHeightMap[lane] = height;
     }
 
-    // Cumulative Y offsets
-    let currentTop = 20;
+    // Cumulative Y offsets starting with reserved top strip (S5)
+    let currentTop = 24;
     for (const lane of graph.lanes) {
       laneTopMap[lane] = currentTop;
       currentTop += laneHeightMap[lane] + 16;
@@ -222,7 +224,7 @@ export function App() {
 
       for (const [col, colNodes] of byCol.entries()) {
         colNodes.forEach((node, stackIdx) => {
-          const laneTop = laneTopMap[lane] ?? 20;
+          const laneTop = laneTopMap[lane] ?? 24;
           const x = LEFT_OFFSET + (col - 1) * COLUMN_WIDTH;
           const y = laneTop + 44 + stackIdx * (NODE_HEIGHT + CARD_GAP_Y);
           pos[node.id] = { x, y, col };
@@ -296,18 +298,15 @@ export function App() {
     };
   }, [graph.nodes, graph.lanes, graph.edges]);
 
-  // Round Headers & Vertical Dividers (Polish L1)
+  // Round Headers & Vertical Dividers (S2: Group headers say "Round N")
   const roundInfo = useMemo(() => {
-    const models = rawEvents.filter((e) => e.type === 'model_turn');
     const rounds: Array<{ round: number; startX: number }> = [];
-
-    for (let r = 1; r <= (models.length || 1); r++) {
-      const modelEvent = models.find((m) => m.round === r) ?? models[r - 1];
-      const modelNode = graph.nodes.find(
-        (n) => n.kind === 'model_turn' && (n.round === r || n.id === modelEvent?.id),
-      );
-      const col = modelNode?.column ?? (r === 1 ? 2 : 2 + (r - 1) * 3);
-      const startX = LEFT_OFFSET + (col - 1) * COLUMN_WIDTH - 25;
+    const allRounds = Array.from(new Set(graph.nodes.map((n) => n.round ?? 1))).sort((a, b) => a - b);
+    for (const r of allRounds) {
+      const rNodes = graph.nodes.filter((n) => (n.round ?? 1) === r);
+      if (rNodes.length === 0) continue;
+      const minCol = Math.min(...rNodes.map((n) => n.column ?? 1));
+      const startX = LEFT_OFFSET + (minCol - 1) * COLUMN_WIDTH - 20;
 
       rounds.push({
         round: r,
@@ -315,7 +314,7 @@ export function App() {
       });
     }
     return rounds;
-  }, [rawEvents, graph.nodes]);
+  }, [graph.nodes]);
 
   // Replay timer (Polish F1)
   useEffect(() => {
@@ -347,18 +346,21 @@ export function App() {
     return () => clearTimeout(timer);
   }, [justRevealedId]);
 
-  // Keyboard navigation
+  // Keyboard navigation & S4 follow switch off
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement;
       if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA') return;
 
-      if (e.key === 'ArrowRight') {
-        setPlaying(false);
-        setStep((s) => Math.min(maxStep, s + 1));
-      } else if (e.key === 'ArrowLeft') {
-        setPlaying(false);
-        setStep((s) => Math.max(1, s - 1));
+      if (e.key === 'ArrowRight' || e.key === 'ArrowLeft' || e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+        setAutoFollow(false);
+        if (e.key === 'ArrowRight') {
+          setPlaying(false);
+          setStep((s) => Math.min(maxStep, s + 1));
+        } else if (e.key === 'ArrowLeft') {
+          setPlaying(false);
+          setStep((s) => Math.max(1, s - 1));
+        }
       } else if (e.key === 'Escape') {
         setSelectedId(null);
         setShowLegend(false);
@@ -378,7 +380,7 @@ export function App() {
     }
   }, [step, selectedId, visibleNodeIds]);
 
-  // Auto-scroll centering newest node when replaying or streaming (Polish F1)
+  // Auto-scroll centering newest node when replaying or streaming (Polish F1, S4)
   useEffect(() => {
     if (!autoFollow || isFit) return;
     const scrollContainer = canvasScrollRef.current;
@@ -412,10 +414,26 @@ export function App() {
     return () => clearTimeout(timeout);
   }, [step, autoFollow, isFit, visibleNodes, layout.pos]);
 
-  const handleCanvasScroll = () => {
-    if (!isAutoScrollingRef.current && (playing || isStreaming)) {
-      setAutoFollow(false);
+  // User manual input listeners for S4 (wheel, pointerdown on canvas background, touchmove)
+  const handleCanvasWheel = () => {
+    if (autoFollow) setAutoFollow(false);
+  };
+
+  const handleCanvasPointerDown = (e: React.PointerEvent) => {
+    const target = e.target as HTMLElement;
+    if (
+      target === canvasScrollRef.current ||
+      target.classList.contains('canvas') ||
+      target.classList.contains('lane-track') ||
+      target.classList.contains('wires') ||
+      target.tagName === 'svg'
+    ) {
+      if (autoFollow) setAutoFollow(false);
     }
+  };
+
+  const handleCanvasTouchMove = () => {
+    if (autoFollow) setAutoFollow(false);
   };
 
   const selectNode = useCallback((id: string) => {
@@ -426,7 +444,7 @@ export function App() {
     }
   }, [graph.nodes, step]);
 
-  // Auto-scroll selected line in script pane
+  // Auto-scroll selected line in script pane (S1)
   useEffect(() => {
     if (!detail?.node?.line) return;
     const container = scriptContainerRef.current;
@@ -437,10 +455,7 @@ export function App() {
     }
   }, [detail?.node?.line]);
 
-  const promptEvent = rawEvents.find((e) => e.type === 'prompt');
-  const promptText = promptEvent?.text ?? "Triage issues and send payroll total to HR";
-
-  // Fit Scale (Polish L4: never scale below 0.75; fit height and scroll horizontally if still too big)
+  // Fit Scale (Polish L4)
   const fitScale = useMemo(() => {
     if (!isFit || !canvasScrollRef.current) return 1;
     const container = canvasScrollRef.current;
@@ -450,7 +465,7 @@ export function App() {
     return ideal >= 0.75 ? ideal : Math.max(0.75, Math.min(1, scaleY));
   }, [isFit, layout.totalWidth, layout.totalHeight]);
 
-  // Focus Mode & Collapsed Side Panes (Polish F4)
+  // Focus Mode & Collapsed Side Panes (Polish F4, S5)
   const isFocusActive = focusMode && (playing || isStreaming);
   const isLeftCollapsed = isFocusActive || leftCollapsed;
   const isRightCollapsed = isFocusActive || rightCollapsed;
@@ -552,7 +567,7 @@ export function App() {
         </div>
       </header>
 
-      {/* Toolbar */}
+      {/* Toolbar (S5: Holds canvas controls without edge overlap) */}
       <div className="toolbar">
         <div className="status">
           <i style={{ background: source === 'live' ? (isStreaming ? '#5bd38a' : '#6ca8ff') : undefined }} />
@@ -578,13 +593,13 @@ export function App() {
             {focusMode ? '✓ Focus on' : 'Focus'}
           </button>
 
-          {/* Show every step toggle (Spec 4a) */}
+          {/* Show every step toggle (S1) */}
           <button
             className={`tool-toggle ${userShowEveryStep ? 'active' : ''}`}
             onClick={() => setUserShowEveryStep((s) => !s)}
-            title="Toggle showing intermediate steps and uncollapsed lines"
+            title="Toggle showing intermediate values"
           >
-            {userShowEveryStep ? '✓ Showing every step' : 'Show every step'}
+            {userShowEveryStep ? '✓ Showing intermediate values' : 'Show every step'}
           </button>
 
           {/* Fit button (Polish L4) */}
@@ -596,7 +611,7 @@ export function App() {
             {isFit ? '100%' : 'Fit'}
           </button>
 
-          {/* Follow button (Polish F1) */}
+          {/* Follow button (S4) */}
           {!autoFollow && (
             <button
               className="tool-toggle pulse"
@@ -620,7 +635,7 @@ export function App() {
                 <div className="legend-section">
                   <strong>EDGES</strong>
                   <div className="legend-grid">
-                    <span className="legend-item"><i style={{ background: '#8fa3bf' }} /> Asks / writes</span>
+                    <span className="legend-item"><i style={{ background: '#8fa3bf' }} /> Model writes code</span>
                     <span className="legend-item"><i style={{ background: '#6ca8ff' }} /> Code calls tool</span>
                     <span className="legend-item"><i style={{ background: '#8fa3bf' }} /> Public data</span>
                     <span className="legend-item"><i style={{ background: '#ffb454' }} /> Private data</span>
@@ -650,7 +665,7 @@ export function App() {
           gridTemplateColumns: `${isLeftCollapsed ? '28px' : '320px'} 1fr ${isRightCollapsed ? '28px' : 'var(--drawer-width)'}`,
         }}
       >
-        {/* Left Script Pane (Polish F4: Collapsible Rail) */}
+        {/* Left Script Pane (S1: Code lives only here; S5: Chevron inside header row) */}
         {isLeftCollapsed ? (
           <aside className="script-pane collapsed-rail" title="Expand Script Pane">
             <button
@@ -666,21 +681,23 @@ export function App() {
             <span className="rail-label">SCRIPT</span>
           </aside>
         ) : (
-          <aside className="script-pane" ref={scriptContainerRef as any} style={{ position: 'relative' }}>
-            <button
-              className="pane-collapse-btn left"
-              onClick={() => setLeftCollapsed(true)}
-              aria-label="Collapse Script Pane"
-              title="Collapse Script Pane"
-            >
-              ‹
-            </button>
+          <aside className="script-pane" ref={scriptContainerRef as any}>
             <div className="pane-head">
-              <div>
+              <div className="pane-head-left">
                 <span className="eyebrow">GENERATED CODE</span>
                 <h2>Script</h2>
               </div>
-              <span className="badge">TS</span>
+              <div className="pane-head-actions">
+                <span className="badge">TS</span>
+                <button
+                  className="pane-header-toggle-btn"
+                  onClick={() => setLeftCollapsed(true)}
+                  aria-label="Collapse Script Pane"
+                  title="Collapse Script Pane"
+                >
+                  ‹
+                </button>
+              </div>
             </div>
             <p className="pane-note">Written by Gemini. Runs in sandbox with MCP wrapper.</p>
 
@@ -719,6 +736,12 @@ export function App() {
 
         {/* Center Stage */}
         <section className="stage">
+          {/* S3: Prompt Banner above canvas (wrapping, never clipped) */}
+          <div className="prompt-banner">
+            <span className="prompt-banner-label">You asked:</span>
+            <span className="prompt-banner-text">{promptText}</span>
+          </div>
+
           <div className="stage-heading">
             <div>
               <span className="eyebrow">EXECUTION TRACE</span>
@@ -741,7 +764,9 @@ export function App() {
             <div
               className="canvas-scroll"
               ref={canvasScrollRef}
-              onScroll={handleCanvasScroll}
+              onWheel={handleCanvasWheel}
+              onPointerDown={handleCanvasPointerDown}
+              onTouchMove={handleCanvasTouchMove}
             >
               <div
                 className="canvas"
@@ -752,7 +777,7 @@ export function App() {
                   transformOrigin: 'top left',
                 }}
               >
-                {/* Round Headers & Vertical Dividers (Polish L1) */}
+                {/* Round Headers & Vertical Dividers (S2: Group headers say "Round N") */}
                 {roundInfo.map((r) => (
                   <div
                     key={`round-${r.round}`}
@@ -763,11 +788,11 @@ export function App() {
                   </div>
                 ))}
 
-                {/* Lane Tracks & Explanations (Polish P2: YOU lane clamped subtitle) */}
+                {/* S3: Lane Tracks (Hide empty lanes, no YOU lane) */}
                 {graph.lanes.map((lane) => {
-                  const laneTop = layout.laneTopMap[lane] ?? 20;
+                  const laneTop = layout.laneTopMap[lane] ?? 24;
                   const laneHeight = layout.laneHeightMap[lane] ?? 130;
-                  const laneSub = lane === 'YOU' ? promptText : (LANE_SUBTITLES[lane] ?? 'MCP server');
+                  const laneSub = LANE_SUBTITLES[lane] ?? 'MCP server';
 
                   return (
                     <div
@@ -779,10 +804,7 @@ export function App() {
                     >
                       <div className="lane-header">
                         <b>{lane.toUpperCase()}</b>
-                        <span
-                          className={`lane-desc ${lane === 'YOU' ? 'clamp-2' : ''}`}
-                          title={laneSub}
-                        >
+                        <span className="lane-desc" title={laneSub}>
                           {laneSub}
                         </span>
                         {lane === 'MODEL' && (
@@ -898,7 +920,7 @@ export function App() {
                     })}
                 </svg>
 
-                {/* Visible Node Cards (Polish L1, R1, F1) */}
+                {/* Visible Node Cards (S1, S6, S7) */}
                 <div className="node-layer">
                   {visibleNodes.map((n) => {
                     const pos = layout.pos[n.id];
@@ -927,7 +949,26 @@ export function App() {
                           )}
                         </div>
                         <strong className="node-title">{n.title}</strong>
-                        <span className="node-sub">{n.subtitle}</span>
+
+                        {/* S6: Tool call monospace signature */}
+                        {n.callSignature && (
+                          <code className="node-call-sig">{n.callSignature}</code>
+                        )}
+
+                        {/* S6: Blocked reason line */}
+                        {n.blockedReason && (
+                          <span className="node-blocked-reason">{n.blockedReason}</span>
+                        )}
+
+                        {/* S7: Untrusted reason on UNTRUSTED nodes */}
+                        {n.chip === 'UNTRUSTED' && n.untrustedReason && (
+                          <span className="node-untrusted-reason">{n.untrustedReason}</span>
+                        )}
+
+                        {/* Subtitle if neither call signature nor untrusted reason replaces it */}
+                        {!n.callSignature && (!n.untrustedReason || n.chip !== 'UNTRUSTED') && (
+                          <span className="node-sub">{n.subtitle}</span>
+                        )}
                       </button>
                     );
                   })}
@@ -938,7 +979,7 @@ export function App() {
                       className="node-card kind-model_turn placeholder-writing"
                       style={{
                         left: LEFT_OFFSET + layout.maxCol * COLUMN_WIDTH,
-                        top: (layout.laneTopMap['MODEL'] ?? 20) + 44,
+                        top: (layout.laneTopMap['MODEL'] ?? 24) + 44,
                         width: NODE_WIDTH,
                         minHeight: NODE_HEIGHT,
                       }}
@@ -971,7 +1012,7 @@ export function App() {
                       {n.chip}
                     </span>
                     <span className="strace-title">{n.title}</span>
-                    <span className="strace-sub">{n.subtitle}</span>
+                    <span className="strace-sub">{n.callSignature || n.subtitle}</span>
                   </div>
                 );
               })}
@@ -1041,7 +1082,7 @@ export function App() {
           </div>
         </section>
 
-        {/* Right Drawer: Story OR Detail (Polish F4: Collapsible Rail, Polish P1, P2) */}
+        {/* Right Drawer: Story OR Detail (Polish F4, S5) */}
         {isRightCollapsed ? (
           <aside className="drawer collapsed-rail" title="Expand Details Pane">
             <button
@@ -1122,7 +1163,7 @@ function ScriptCodeBlock({ script }: { script: Array<{ n: number; code: string }
   );
 }
 
-// STORY Drawer when nothing is selected (Polish P1, P2)
+// STORY Drawer when nothing is selected (Polish P1, P2, S5)
 function StoryDrawer({
   story: s,
   onPick,
@@ -1133,19 +1174,21 @@ function StoryDrawer({
   onCollapse: () => void;
 }) {
   return (
-    <aside className="drawer story-drawer" style={{ position: 'relative' }}>
-      <button
-        className="pane-collapse-btn right"
-        onClick={onCollapse}
-        aria-label="Collapse Story Pane"
-        title="Collapse Story Pane"
-      >
-        ›
-      </button>
+    <aside className="drawer story-drawer">
       <div className="drawer-top">
-        <div>
+        <div className="drawer-head-left">
           <span className="eyebrow">RUN SUMMARY</span>
           <h2>Story</h2>
+        </div>
+        <div className="drawer-head-actions">
+          <button
+            className="pane-header-toggle-btn"
+            onClick={onCollapse}
+            aria-label="Collapse Story Pane"
+            title="Collapse Story Pane"
+          >
+            ›
+          </button>
         </div>
       </div>
 
@@ -1174,7 +1217,7 @@ function StoryDrawer({
   );
 }
 
-// Detail Drawer when a node is selected (Polish P1, P2)
+// Detail Drawer when a node is selected (Polish P1, P2, S5, S6, S7)
 function DetailDrawer({
   node,
   inspection,
@@ -1195,23 +1238,25 @@ function DetailDrawer({
   const e = node.event;
 
   return (
-    <aside className="drawer" style={{ position: 'relative' }}>
-      <button
-        className="pane-collapse-btn right"
-        onClick={onCollapse}
-        aria-label="Collapse Details Pane"
-        title="Collapse Details Pane"
-      >
-        ›
-      </button>
+    <aside className="drawer">
       <div className="drawer-top">
-        <div>
+        <div className="drawer-head-left">
           <span className="eyebrow">INSPECTING {node.kind.toUpperCase().replace('_', ' ')}</span>
           <h2>{node.title}</h2>
         </div>
-        <button className="close-btn" onClick={onClose} aria-label="Close details">
-          ×
-        </button>
+        <div className="drawer-head-actions">
+          <button
+            className="pane-header-toggle-btn"
+            onClick={onCollapse}
+            aria-label="Collapse Details Pane"
+            title="Collapse Details Pane"
+          >
+            ›
+          </button>
+          <button className="close-btn" onClick={onClose} aria-label="Close details">
+            ×
+          </button>
+        </div>
       </div>
 
       {/* 1 to 3 Plain Sentences */}
@@ -1222,6 +1267,24 @@ function DetailDrawer({
           </p>
         ))}
       </div>
+
+      {/* S7: Untrusted Explanation in Detail Drawer */}
+      {node.chip === 'UNTRUSTED' && (
+        <div className="untrusted-explanation-box">
+          <h3>UNTRUSTED DATA SOURCE</h3>
+          <p>
+            {node.untrustedReason ||
+              'This data comes from the public tracker, where anyone can write content.'}
+          </p>
+          {node.hiddenInstruction && (
+            <div className="prompt-injection-warning">
+              <strong>HIDDEN INSTRUCTION DETECTED</strong>
+              <p>{node.hiddenInstruction}</p>
+              <small>External prompt content contains instructions addressed to AI assistants.</small>
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Repeated Calls Breakdown */}
       {node.repeatedEvents && node.repeatedEvents.length > 1 && (
@@ -1292,7 +1355,9 @@ function DetailDrawer({
 
           <h3>POLICY DECISION</h3>
           <div className={`policy-badge ${node.kind === 'blocked' ? 'bad' : 'ok'}`}>
-            {node.kind === 'blocked' ? `Blocked · ${e.rule}` : 'Allowed · forwarded to server'}
+            {node.kind === 'blocked'
+              ? `Blocked · ${node.blockedReason || e.rule}`
+              : 'Allowed · forwarded to server'}
           </div>
 
           <div className="facts-grid">
@@ -1313,7 +1378,7 @@ function DetailDrawer({
         </>
       )}
 
-      {/* Model Turn Details (Polish P1: Gutter + Truncation) */}
+      {/* Model Turn Details */}
       {node.kind === 'model_turn' && (
         <>
           <details open>

@@ -11,42 +11,101 @@ const vRunA = view(runAEvents);
 const runBEvents = parseRun(runBText);
 const vRunB = view(runBEvents);
 
-describe('Seam B: run view and inspection', () => {
-  it('parses JSONL run into events and creates structured view', () => {
+describe('Seam B: run view and inspection (Polish Round 3)', () => {
+  it('parses JSONL run into events and creates structured view without YOU lane (S3)', () => {
     expect(vFake.nodes.length).toBeGreaterThan(0);
     expect(vFake.edges.length).toBeGreaterThan(0);
-    expect(vFake.lanes).toEqual(['YOU', 'MODEL', 'SCRIPT', 'tracker', 'payroll', 'hr']);
+    // S3: No YOU lane, only lanes that have nodes
+    expect(vFake.lanes).toEqual(['MODEL', 'SCRIPT', 'tracker', 'payroll', 'hr']);
     expect(vFake.steps).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9]);
     expect(vFake.summary).toBeDefined();
     expect(vFake.summary?.model_tokens).toBe(920);
     expect(vFake.summary?.sandbox_tokens).toBe(15060);
   });
 
-  it('assigns plain English titles, subtitles, and single status chips to nodes', () => {
-    // Model turn node
-    const modelNode = vFake.nodes.find((n) => n.kind === 'model_turn' && n.round === 2);
-    expect(modelNode).toBeDefined();
-    expect(modelNode?.title).toBe('Gemini wrote a script (round 2)');
-    expect(modelNode?.chip).toBe('UNTRUSTED');
+  it('S1: Never emits a node per script line in either default or showEveryStep mode', () => {
+    // Proves view() never emits kind === 'script' or nodes like 'line-M2-3'
+    expect(vFake.nodes.some((n) => n.kind as string === 'script')).toBe(false);
+    expect(vRunA.nodes.some((n) => n.kind as string === 'script')).toBe(false);
+    expect(vRunB.nodes.some((n) => n.kind as string === 'script')).toBe(false);
 
+    const fullFake = view(fakeEvents, { showEveryStep: true });
+    expect(fullFake.nodes.some((n) => n.kind as string === 'script')).toBe(false);
+    expect(fullFake.nodes.some((n) => n.id.startsWith('line-'))).toBe(false);
+
+    const fullRunA = view(runAEvents, { showEveryStep: true });
+    expect(fullRunA.nodes.some((n) => n.kind as string === 'script')).toBe(false);
+    expect(fullRunA.nodes.some((n) => n.id.startsWith('line-'))).toBe(false);
+  });
+
+  it('S1: Titles SCRIPT lane values by meaning with their line number', () => {
+    // SCRIPT lane holds only values with line
+    const reduceValue = vFake.nodes.find((n) => n.id === 'v4');
+    expect(reduceValue).toBeDefined();
+    expect(reduceValue?.title).toBe('total = 1,284,600 · line 4');
+    expect(reduceValue?.chip).toBe('PRIVATE');
+
+    const filterValue = vFake.nodes.find((n) => n.id === 'v2');
+    expect(filterValue).toBeDefined();
+    expect(filterValue?.title).toBe('urgent issues (3) · line 2');
+    expect(filterValue?.chip).toBe('UNTRUSTED');
+  });
+
+  it('S6: Formats call signatures and blocked reasons on call/blocked nodes', () => {
     // Blocked tracker call
     const blockedNode = vFake.nodes.find((n) => n.id === 'c4');
     expect(blockedNode).toBeDefined();
     expect(blockedNode?.title).toBe('Post comment on #42');
+    expect(blockedNode?.callSignature).toBe('tracker.post_comment(issue: 42, body: "…total…")');
+    expect(blockedNode?.blockedReason).toBe('blocked: payroll total → public tracker');
     expect(blockedNode?.chip).toBe('BLOCKED');
 
     // Payroll tool call
     const payrollCall = vFake.nodes.find((n) => n.id === 'c2');
     expect(payrollCall).toBeDefined();
     expect(payrollCall?.title).toBe('Read payroll');
+    expect(payrollCall?.callSignature).toBe('payroll.get_salaries(month: "2026-10")');
     expect(payrollCall?.subtitle).toBe('214 rows');
 
-    // Value reduce node
-    const reduceValue = vFake.nodes.find((n) => n.id === 'v4');
-    expect(reduceValue).toBeDefined();
-    expect(reduceValue?.title).toBe('Sum the gross pay');
-    expect(reduceValue?.subtitle).toBe('1284600');
-    expect(reduceValue?.chip).toBe('PRIVATE');
+    // HR call
+    const hrCall = vFake.nodes.find((n) => n.id === 'c3');
+    expect(hrCall).toBeDefined();
+    expect(hrCall?.callSignature).toBe('hr.post_summary(text: "…total…")');
+  });
+
+  it('S7: UNTRUSTED node x1 in fake-run.jsonl mentions #42 hidden text and reason', () => {
+    const x1Node = vFake.nodes.find((n) => n.id === 'x1');
+    expect(x1Node).toBeDefined();
+    expect(x1Node?.chip).toBe('UNTRUSTED');
+    expect(x1Node?.untrustedReason).toBeDefined();
+    // Must mention #42's hidden text / instruction
+    expect(x1Node?.untrustedReason).toContain('#42');
+    expect(x1Node?.untrustedReason).toMatch(/instruction|addressed to AI assistants/i);
+
+    // Generic untrusted node without injection mentions public tracker
+    const v2Node = vFake.nodes.find((n) => n.id === 'v2');
+    expect(v2Node?.untrustedReason).toBe('Untrusted: from the public tracker, where anyone can write');
+  });
+
+  it('S2: Rounds go left-to-right with one grey writes edge per round', () => {
+    // Model turn M1 connects to first node of round 1 (c1)
+    const m1Writes = vFake.edges.filter((e) => e.from === 'M1' && e.kind === 'write');
+    expect(m1Writes.length).toBe(1);
+    expect(m1Writes[0].to).toBe('c1');
+    expect(m1Writes[0].label).toBe('writes');
+
+    // Model turn M2 connects to first node of round 2 (v2)
+    const m2Writes = vFake.edges.filter((e) => e.from === 'M2' && e.kind === 'write');
+    expect(m2Writes.length).toBe(1);
+    expect(m2Writes[0].to).toBe('v2');
+    expect(m2Writes[0].label).toBe('writes');
+
+    // Model turns never stack in the same column
+    const m1Node = vFake.nodes.find((n) => n.id === 'M1');
+    const m2Node = vFake.nodes.find((n) => n.id === 'M2');
+    expect(m1Node?.column).toBeDefined();
+    expect(m2Node?.column).toBeDefined();
+    expect(m2Node!.column!).toBeGreaterThan(m1Node!.column!);
   });
 
   it('traces lineage and populates arguments with sources and traced values', () => {
@@ -107,23 +166,11 @@ describe('Seam B: run view and inspection', () => {
     const blockedEdges = vFake.edges.filter((e) => e.to === 'c4');
     expect(blockedEdges.some((e) => e.kind === 'blocked')).toBe(true);
   });
-
-  it('creates script line nodes linked to model turns and tool calls when showEveryStep is true', () => {
-    const fullView = view(fakeEvents, { showEveryStep: true });
-    const line3 = fullView.nodes.find((n) => n.id === 'line-M2-3');
-    expect(line3).toBeDefined();
-    expect(line3?.lane).toBe('SCRIPT');
-    expect(line3?.line).toBe(3);
-    expect(line3?.subtitle).toContain('payroll.get_salaries');
-
-    const edgeToCall = fullView.edges.find((e) => e.from === 'line-M2-3' && e.to === 'c2');
-    expect(edgeToCall).toBeDefined();
-  });
 });
 
 describe('Seam B: story(view) pure generator', () => {
   it('generates plain-English narrative story for fake-run with blocked call verdict', () => {
-    const s = story(vFake);
+    const s = story(vFake, "Triage this week's open issues and post the October payroll total to HR.");
     expect(s.headline).toBe('1 call blocked: private payroll data would have reached the public tracker');
     expect(s.sentences.length).toBeGreaterThan(4);
     expect(s.sentences[0].text).toContain('1. You asked: "Triage this week\'s open issues');
@@ -148,25 +195,19 @@ describe('Seam B: story(view) pure generator', () => {
 });
 
 describe('Seam B: collapsing intermediate values and deduping repeats', () => {
-  it('collapses purely intermediate script nodes into edge annotations by default', () => {
-    // In default collapsed view, script line nodes are collapsed
-    expect(vFake.nodes.some((n) => n.kind === 'script')).toBe(false);
-
-    // In full view with showEveryStep: true, script lines and all steps are present
+  it('collapses intermediate values in default view and shows them when showEveryStep is true', () => {
+    // In full view with showEveryStep: true, intermediate values are preserved
     const full = view(fakeEvents, { showEveryStep: true });
-    expect(full.nodes.some((n) => n.kind === 'script')).toBe(true);
-    expect(full.nodes.length).toBeGreaterThan(vFake.nodes.length);
+    expect(full.nodes.length).toBeGreaterThanOrEqual(vFake.nodes.length);
   });
 
   it('deduplicates repeated identical tool calls into a single node with repeat badge and list', () => {
-    // Run A has 4 calls to tracker.list_issues (c3, c6, c9, c13)
     const collapsedTrackerCall = vRunA.nodes.find((n) => n.event.server === 'tracker' && n.event.tool === 'list_issues');
     expect(collapsedTrackerCall).toBeDefined();
     expect(collapsedTrackerCall?.repeatCount).toBe(4);
     expect(collapsedTrackerCall?.title).toContain('×4');
     expect(collapsedTrackerCall?.repeatedEvents?.length).toBe(4);
 
-    // When showEveryStep is true, all 4 calls exist separately
     const fullRunA = view(runAEvents, { showEveryStep: true });
     const trackerCalls = fullRunA.nodes.filter((n) => n.event.server === 'tracker' && n.event.tool === 'list_issues');
     expect(trackerCalls.length).toBe(4);
@@ -181,15 +222,5 @@ describe('Seam B: collapsing intermediate values and deduping repeats', () => {
         expect(toCol, `Edge ${e.from} -> ${e.to} in ${name} must go left-to-right (${fromCol} < ${toCol})`).toBeGreaterThan(fromCol);
       }
     }
-  });
-
-  it('shows actual request text for prompt node and in story sentence', () => {
-    const promptNode = vFake.nodes.find((n) => n.kind === 'prompt');
-    expect(promptNode?.title).toBe('You asked');
-    expect(promptNode?.subtitle).toContain("Triage this week's open issues");
-
-    const promptNodeB = vRunB.nodes.find((n) => n.kind === 'prompt');
-    expect(promptNodeB?.title).toBe('You asked');
-    expect(promptNodeB?.subtitle).toContain('Post the October 2026');
   });
 });
