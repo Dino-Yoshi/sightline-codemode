@@ -647,6 +647,7 @@ export function App() {
       const targetNode = stepNodes.at(-1) ?? graph.nodes.filter((n) => n.step <= clamped).at(-1);
       if (targetNode) {
         setJustRevealedId(targetNode.id);
+        setSelectedId(targetNode.id);
         const scrollContainer = canvasScrollRef.current;
         const nodePos = layout.pos[targetNode.id];
         if (scrollContainer && nodePos) {
@@ -857,11 +858,6 @@ export function App() {
           <span className="brand-icon">◈</span> MCP<span>Vision</span>
           <small>/ STRACE FOR CODE MODE</small>
         </div>
-        <div className="task">
-          <span className="task-label">YOUR TASK</span>
-          <strong title={promptText}>{promptText}</strong>
-        </div>
-
         {/* G6: Run Picker with Honest Labels */}
         <div className="seg">
           <button

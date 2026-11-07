@@ -10,7 +10,8 @@ describe('App Component Integration Tests (Polish Round 4)', () => {
   it('renders top bar, task, brand, replay controls, and prompt banner (S3)', () => {
     const { container } = render(<App />);
     expect(container.querySelector('.brand')).toHaveTextContent('MCPVision');
-    expect(screen.getByText('YOUR TASK')).toBeInTheDocument();
+    expect(screen.queryByText('YOUR TASK')).not.toBeInTheDocument();
+    expect(screen.getByText('You asked:')).toBeInTheDocument();
     expect(screen.getAllByText(/Triage this week's open issues/).length).toBeGreaterThan(0);
     expect(screen.getByText('Run replay')).toBeInTheDocument();
 
