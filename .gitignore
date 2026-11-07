@@ -12,3 +12,5 @@ __pycache__/
 
 # Private research and personal inventory: never publish
 predocs/
+node_modules/
+dist/

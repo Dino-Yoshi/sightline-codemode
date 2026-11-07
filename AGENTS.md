@@ -15,3 +15,7 @@ The five default labels (`needs-triage`, `needs-info`, `ready-for-agent`, `ready
 ### Domain docs
 
 Single-context: `GLOSSARY.md` and `docs/adr/` at the repo root, created only when needed. See `docs/agents/domain.md`.
+
+## Project
+
+Read `PROPOSAL.md` (the spec) and `HANDOFF.md` (status) before doing anything. Work only on your GitHub issue, inside your own paths (PROPOSAL §7), on your own branch. The example run format is `runs/fake-run.jsonl`. Submission target: 3:30 PM PT.

@@ -1,7 +1,7 @@
 # Handoff: status only
 
 **`PROPOSAL.md` is the spec.** This file only tracks status, the environment and the schedule.
-To start the agents, see `KICKOFF.md`.
+**To start the agents, follow `KICKOFF.md`.**
 
 ## Status (updated 2026-11-07, around 11:30)
 

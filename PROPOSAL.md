@@ -185,7 +185,7 @@ source.
 | `engine/src/agent.ts` | Antigravity agent 2 | Code Mode spike, the Gemini loop, the two demo tasks, the WebSocket |
 | `runs/` | shared | `fake-run.jsonl` and the recorded demo runs |
 
-`engine/` is a single Node and TypeScript project (pnpm).
+`engine/` is a single Node and TypeScript project (npm; pnpm is not installed).
 
 **Interfaces** (agree on these, then build them in parallel):
 
