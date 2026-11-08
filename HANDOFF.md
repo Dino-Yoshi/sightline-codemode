@@ -1,34 +1,47 @@
 # Handoff: status only
 
-**`PROPOSAL.md` is the spec.** This file only tracks status, the environment and the schedule.
-**To start the agents, follow `KICKOFF.md`.**
+**`PROPOSAL.md` is the spec. `README.md` is the public description.** This file only tracks status.
 
-## Status (updated 2026-11-07, around 11:30)
+## Status: submitted (2026-11-07, Zero To Demo, Frontier track)
 
-- The spec is locked in `PROPOSAL.md`. The structure is locked as `design/mockups/hybrid.html`,
-  but its look is not.
-- The build issues are on GitHub, labelled `ready-for-agent`.
-- `runs/fake-run.jsonl` is the canonical example run. The UI is built against it.
-- **Code Mode runtime decision (11:50)**: Cloudflare's `@cloudflare/codemode` `DynamicWorkerExecutor` requires Cloudflare Workers dynamic dispatch (`WorkerLoader` binding) and `cloudflare:workers` runtime primitives not present in local Node. Per `PROPOSAL.md` §3 and GitHub issue #2 fallback, we took the **Node `vm` runtime path**: real Code Mode prompt and TypeScript/JavaScript code generation driven by Gemini (`gemini-3.7-flash` via Vertex AI), with execution of the generated code inside a Node `vm` sandbox via the tool wrapper.
+- **Submitted on BuilderBase:** the repo (github.com/Dino-Yoshi/sightline-codemode), a 64-second
+  demo video, the description and a two-slide pitch deck.
+- **Product name:** SightLine (formerly MCPVision), "strace for Code Mode".
+- **`main` is the submitted version.** The UI was frozen for the demo; tags `demo-freeze` and
+  `demo-safe-1410` mark known-good states.
 
-## Schedule (solo with agents; submit at 3:30, hard close 5:30)
+## What works
 
-| When | Where | Job |
-|---|---|---|
-| 11:45 → 1:30 | Antigravity agent 1 · Antigravity agent 2 · Codex · Kiro | UI · planner · interpreter and policy · gateway and fixtures (in parallel) |
-| 1:30 → 2:15 | Antigravity | Merge the branches; a live run streams into the UI |
-| 2:15 → 3:00 | Antigravity, with you | Clean up the look |
-| 3:00 → 3:30 | Antigravity agent 2 | Record runs A and B, write the README |
-| 3:30 | You | **Submit on BuilderBase** |
-| 3:30 → 5:30 | You | Buffer: fixes, 3 rehearsals, Firecrawl stretch |
+- Gemini (Vertex AI, `gemini-3.7-flash`) writes scripts with Cloudflare's real `@cloudflare/codemode`
+  code generation.
+- The scripts run in a Node `vm` sandbox. Every tool call goes through the SightLine wrapper: lineage
+  (static data-flow over the generated TypeScript plus runtime values), then the policy check before
+  forwarding, then three fixture MCP servers over stdio (payroll, tracker, hr).
+- One rule: private lineage can't reach a public sink. Unknown lineage counts as private. Untrusted
+  text is labelled but never blocks on its own.
+- The UI shows time-ordered lanes, click to trace, the Story panel, the drawer, strace, replay at
+  0.25–2×, follow, collapsible rounds and a minimap, plus live runs over a WebSocket.
+- Runs: `runs/run-a.jsonl` and `runs/run-b.jsonl` are recorded live Gemini runs.
+  `runs/fake-run.jsonl` is a hand-written simulated run, labelled as such in the UI.
+- Tests: engine 26 (seam A plus unit tests), UI 43 (seam B plus component tests).
 
-If a build runs past its slot, cut using the drop order in `PROPOSAL.md` §6 rather than moving
-the times. If an agent stalls, Codex takes over its issue.
+## Known limits and next steps
+
+- **Real Cloudflare executor:** `DynamicWorkerExecutor` needs the Cloudflare Workers runtime
+  (`WorkerLoader` binding). Two time-boxed attempts to run it locally through workerd/Miniflare
+  produced nothing, so we stayed on Node `vm` as PROPOSAL §3 planned. Next step: a Miniflare worker
+  with a `worker_loaders` binding that forwards tool calls back to the Node wrapper.
+- **Live runs vary:** Gemini writes a different script each time, and run A often uses all 4 rounds.
+  Present the recorded runs and do one live B.
+- **The "hidden instruction" quote is a text heuristic,** not an injection detector.
+- **Brand spacing:** the header renders "Sight Line" with a gap. It's cosmetic and was left alone
+  for the demo.
 
 ## Environment
 
-- Gemini runs on Vertex AI (`google-genai`, `GOOGLE_GENAI_USE_VERTEXAI=true`, location `global`,
-  `GEMINI_MODEL=gemini-3.7-flash`). Each machine needs its own git-ignored `.env` and a
-  `gcloud auth application-default login`. Both were verified working on the Mac at 10:45.
-- SerpAPI and Firecrawl accounts are linked to the user's GitHub. They're not in `.env` yet.
+- Each machine needs its own git-ignored `.env` (see `.env.example`) and
+  `gcloud auth application-default login`.
+- To run: `cd engine && npx tsx src/agent.ts ws` and `cd ui && npx vite`, then open
+  http://localhost:5173. Recorded runs need no credentials.
+- SerpAPI and Firecrawl accounts are linked to the user's GitHub. They're not in `.env`.
 - **The repo is public.** Never commit `.env` or `predocs/`.
